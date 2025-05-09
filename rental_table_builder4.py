@@ -1550,6 +1550,13 @@ def main():
                 with st.spinner("Analyzing rental data..."):
                     # First fetch actual comparison data for Greater Sydney and Rest of NSW
                     comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
+
+                    # Update the comparison data in self.data with the dynamically fetched values
+                    if "Greater Sydney" in comparison_data and "median_rent" in comparison_data["Greater Sydney"] and comparison_data["Greater Sydney"]["median_rent"] is not None:
+                        analyzer.data["median_rent"]["comparison_gs"]["value"] = comparison_data["Greater Sydney"]["median_rent"]
+                        
+                    if "Rest of NSW" in comparison_data and "median_rent" in comparison_data["Rest of NSW"] and comparison_data["Rest of NSW"]["median_rent"] is not None:
+                        analyzer.data["median_rent"]["comparison_ron"]["value"] = comparison_data["Rest of NSW"]["median_rent"]
                     
                     # Then collect data and analyze the selected area
                     analyzer.collect_data(uploaded_files)
