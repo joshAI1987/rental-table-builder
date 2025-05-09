@@ -10,18 +10,6 @@ from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 import re
 
-# Disable tkinter for Streamlit Cloud
-if os.environ.get("STREAMLIT_SERVER_HEADLESS", "") == "1":
-    import builtins
-    builtins.filedialog = None
-    builtins.messagebox = None
-    class DummyTk:
-        def withdraw(self): pass
-    builtins.Tk = DummyTk
-else:
-    from tkinter import filedialog, messagebox, Tk
-
-
 class RentalDataAnalyzer:
     def __init__(self):
         """Initialize the Rental Data Analyzer with paths and reference data"""
