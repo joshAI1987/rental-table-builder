@@ -1015,10 +1015,10 @@ class RentalDataAnalyzer:
             if pd.isna(local_increase):
                 local_increase = 0
 
-            # Make sure we're using the actual values (7.1% and 8.6%)    
-            gs_value = gs_value  # This already contains 7.1
-            ron_value = ron_value  # This already contains 8.6
-            
+            # Ensure we use the dynamically fetched values
+            gs_value = self.comparison_data["Greater Sydney"]["median_rent"] if hasattr(self, 'comparison_data') and "Greater Sydney" in self.comparison_data and "median_rent" in self.comparison_data["Greater Sydney"] and self.comparison_data["Greater Sydney"]["median_rent"] is not None else comparison_gs["value"]
+            ron_value = self.comparison_data["Rest of NSW"]["median_rent"] if hasattr(self, 'comparison_data') and "Rest of NSW" in self.comparison_data and "median_rent" in self.comparison_data["Rest of NSW"] and self.comparison_data["Rest of NSW"]["median_rent"] is not None else comparison_ron["value"]
+        
             gs_text = ""
             if local_increase < gs_value - 1:  # 1% buffer
                 gs_text = f"lower than Greater Sydney's annual increase of {gs_value}%"
