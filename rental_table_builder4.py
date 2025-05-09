@@ -975,7 +975,7 @@ def fetch_comparison_area_data(self, uploaded_files, area_names=["Greater Sydney
     self.comparison_data = comparison_data
     return comparison_data
     
-    def generate_comparison_comment(self, metric, value, comparison_gs, comparison_ron):
+def generate_comparison_comment(self, metric, value, comparison_gs, comparison_ron):
     """Generate a comparison comment for a metric that shows both Greater Sydney and Rest of NSW references"""
     
     # Use actual fetched data instead of reference values
