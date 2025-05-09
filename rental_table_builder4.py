@@ -56,11 +56,11 @@ class RentalDataAnalyzer:
         
         # Reference data for comparison - will be updated dynamically
         self.GS_REFERENCE_DATA = {
-            "renters": {"area": "Greater Sydney", "value": 32.6},
-            "social_housing": {"area": "Greater Sydney", "value": 4.5},
-            "median_rent": {"area": "Greater Sydney", "value": 12.1},
+            "renters": {"area": "Greater Sydney", "value": 35.9},
+            "social_housing": {"area": "Greater Sydney", "value": 4.2},
+            "median_rent": {"area": "Greater Sydney", "value": 7.14},
             "vacancy_rates": {"area": "Greater Sydney", "value": -0.3},
-            "affordability": {"area": "Greater Sydney", "value": 45.2, "annual_change": 5.1}
+            "affordability": {"area": "Greater Sydney", "value": 33, "annual_change": 0}
         }
         
         # Reference data for comparison - will be updated dynamically
@@ -68,7 +68,7 @@ class RentalDataAnalyzer:
             "renters": {"area": "Rest of NSW", "value": 26.8},
             "social_housing": {"area": "Rest of NSW", "value": 4.0},
             "median_rent": {"area": "Rest of NSW", "value": 8.6},
-            "vacancy_rates": {"area": "Rest of NSW", "value": -0.1},
+            "vacancy_rates": {"area": "Rest of NSW", "value": -0.28},
             "affordability": {"area": "Rest of NSW", "value": 41.7, "annual_change": 3.5}
         }
         
