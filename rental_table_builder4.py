@@ -830,145 +830,300 @@ class RentalDataAnalyzer:
             # Ensure comparison data is attached
             self.data["affordability"]["comparison_gs"] = self.GS_REFERENCE_DATA["affordability"]
             self.data["affordability"]["comparison_ron"] = self.RON_REFERENCE_DATA["affordability"]
+
+def fetch_comparison_area_data(self, uploaded_files, area_names=["Greater Sydney", "Rest of NSW"]):
+    """Fetch actual data for comparison areas (Greater Sydney and Rest of NSW)"""
+    comparison_data = {}
+    
+    for area_name in area_names:
+        comparison_data[area_name] = {
+            "renters": None,
+            "social_housing": None,
+            "median_rent": None,
+            "vacancy_rates": None,
+            "affordability": None,
+            "affordability_previous": None
+        }
+        
+        # For each data category, fetch the actual data for the area
+        for data_type in ["census_dwelling", "median_rents", "vacancy_rates", "affordability"]:
+            for file_data in uploaded_files.get(data_type, []):
+                file_name = file_data['name']
+                if "gccsa" in file_name.lower():  # GCCSA level has both Greater Sydney and Rest of NSW
+                    file_path = file_data['path']
+                    df = self.read_data_file(file_path)
+                    
+                    if df is not None and not df.empty:
+                        geo_col = self.find_geographic_column(df, "GCCSA")
+                        
+                        if geo_col:
+                            # Find rows for the current area
+                            df_area = df[df[geo_col].str.contains(area_name, case=False, na=False)]
+                            
+                            if not df_area.empty:
+                                # Process according to data type
+                                if data_type == "census_dwelling":
+                                    # Calculate renter percentage
+                                    if "dwellings" in df_area.columns and "dwellings_rented" in df_area.columns:
+                                        dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
+                                        rented = float(df_area["dwellings_rented"].iloc[0]) if not pd.isna(df_area["dwellings_rented"].iloc[0]) else 0
+                                        
+                                        if dwellings > 0:
+                                            comparison_data[area_name]["renters"] = round((rented / dwellings) * 100, 1)
+                                    
+                                    # Calculate social housing percentage
+                                    if "dwellings" in df_area.columns and "dwellings_rented_sha" in df_area.columns and "dwellings_rented_chp" in df_area.columns:
+                                        dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
+                                        sha = float(df_area["dwellings_rented_sha"].iloc[0]) if not pd.isna(df_area["dwellings_rented_sha"].iloc[0]) else 0
+                                        chp = float(df_area["dwellings_rented_chp"].iloc[0]) if not pd.isna(df_area["dwellings_rented_chp"].iloc[0]) else 0
+                                        
+                                        if dwellings > 0:
+                                            comparison_data[area_name]["social_housing"] = round(((sha + chp) / dwellings) * 100, 1)
+                                
+                                elif data_type == "median_rents":
+                                    # Get latest month data
+                                    if 'month' in df_area.columns:
+                                        df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                        latest_month = df_area['month'].max()
+                                        df_latest = df_area[df_area['month'] == latest_month]
+                                        
+                                        if 'property_type' in df_latest.columns and 'All Dwellings' in df_latest['property_type'].values:
+                                            df_latest = df_latest[df_latest['property_type'] == 'All Dwellings']
+                                        
+                                        # Find annual growth column
+                                        growth_col = None
+                                        for suffix in ['annual_growth', 'annual_increase', 'yearly_growth', 'yearly_increase']:
+                                            for col in df_latest.columns:
+                                                if col.endswith(suffix):
+                                                    growth_col = col
+                                                    break
+                                            if growth_col:
+                                                break
+                                        
+                                        if growth_col and len(df_latest) > 0:
+                                            growth_value = df_latest[growth_col].iloc[0]
+                                            if not pd.isna(growth_value):
+                                                annual_increase = float(growth_value) * 100 if float(growth_value) < 1 else float(growth_value)
+                                                comparison_data[area_name]["median_rent"] = round(annual_increase, 1)
+                                
+                                elif data_type == "vacancy_rates":
+                                    # Get latest month and year-ago data
+                                    if 'month' in df_area.columns:
+                                        df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                        latest_month = df_area['month'].max()
+                                        df_latest = df_area[df_area['month'] == latest_month]
+                                        
+                                        # Find vacancy rate column
+                                        rate_col = None
+                                        if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
+                                            rate_col = 'rental_vacancy_rate_3m_smoothed'
+                                        else:
+                                            for col in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
+                                                if col in df_latest.columns:
+                                                    rate_col = col
+                                                    break
+                                        
+                                        if rate_col and len(df_latest) > 0:
+                                            current_rate = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
+                                            
+                                            # Get year-ago data to calculate change
+                                            one_year_ago = latest_month - pd.DateOffset(months=12)
+                                            df_year_ago = df_area[df_area['month'] == one_year_ago]
+                                            
+                                            if not df_year_ago.empty and rate_col in df_year_ago.columns:
+                                                prev_rate = float(df_year_ago[rate_col].iloc[0]) if not pd.isna(df_year_ago[rate_col].iloc[0]) else 0
+                                                change = current_rate - prev_rate
+                                                comparison_data[area_name]["vacancy_rates"] = round(change, 2)
+                                
+                                elif data_type == "affordability":
+                                    # Get latest month data
+                                    if 'month' in df_area.columns:
+                                        df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                        latest_month = df_area['month'].max()
+                                        df_latest = df_area[df_area['month'] == latest_month]
+                                        
+                                        # Find affordability column
+                                        aff_col = None
+                                        affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
+                                        if affordability_columns:
+                                            if 'rental_affordability_3mo' in affordability_columns:
+                                                aff_col = 'rental_affordability_3mo'
+                                            elif 'rental_affordability_1mo' in affordability_columns:
+                                                aff_col = 'rental_affordability_1mo'
+                                            else:
+                                                aff_col = affordability_columns[0]
+                                        
+                                        if aff_col and len(df_latest) > 0:
+                                            aff_value = float(df_latest[aff_col].iloc[0]) if not pd.isna(df_latest[aff_col].iloc[0]) else 0
+                                            if aff_value > 0 and aff_value < 1:
+                                                aff_value = aff_value * 100
+                                            
+                                            comparison_data[area_name]["affordability"] = round(aff_value, 1)
+                                            
+                                            # Get year-ago data
+                                            one_year_ago = latest_month - pd.DateOffset(months=12)
+                                            df_year_ago = df_area[df_area['month'] == one_year_ago]
+                                            
+                                            if not df_year_ago.empty and aff_col in df_year_ago.columns:
+                                                prev_aff = float(df_year_ago[aff_col].iloc[0]) if not pd.isna(df_year_ago[aff_col].iloc[0]) else 0
+                                                if prev_aff > 0 and prev_aff < 1:
+                                                    prev_aff = prev_aff * 100
+                                                
+                                                comparison_data[area_name]["affordability_previous"] = round(prev_aff, 1)
+    
+    # Store the fetched comparison data
+    self.comparison_data = comparison_data
+    return comparison_data
     
     def generate_comparison_comment(self, metric, value, comparison_gs, comparison_ron):
-        """Generate a comparison comment for a metric that shows both Greater Sydney and Rest of NSW references"""
+    """Generate a comparison comment for a metric that shows both Greater Sydney and Rest of NSW references"""
+    
+    # Use actual fetched data instead of reference values
+    gs_value = None
+    ron_value = None
+    
+    if hasattr(self, 'comparison_data'):
+        if "Greater Sydney" in self.comparison_data and metric in self.comparison_data["Greater Sydney"]:
+            gs_value = self.comparison_data["Greater Sydney"][metric]
         
-        if metric == "renters":
-            gs_text = ""
-            if value < comparison_gs["value"] - 1:  # 1% buffer to avoid "slightly lower" for small differences
-                gs_text = f"lower than the Greater Sydney average of {comparison_gs['value']}%"
-            elif value > comparison_gs["value"] + 1:
-                gs_text = f"higher than the Greater Sydney average of {comparison_gs['value']}%"
-            else:
-                gs_text = f"similar to the Greater Sydney average of {comparison_gs['value']}%"
-                
-            ron_text = ""
-            if value < comparison_ron["value"] - 1:
-                ron_text = f"and lower than the Rest of NSW average of {comparison_ron['value']}%"
-            elif value > comparison_ron["value"] + 1:
-                ron_text = f"and higher than the Rest of NSW average of {comparison_ron['value']}%"
-            else:
-                ron_text = f"and similar to the Rest of NSW average of {comparison_ron['value']}%"
-                
-            return f"{self.selected_geo_name} ({self.selected_geo_area}) has a concentration of renters that is {gs_text} {ron_text}."
+        if "Rest of NSW" in self.comparison_data and metric in self.comparison_data["Rest of NSW"]:
+            ron_value = self.comparison_data["Rest of NSW"][metric]
+    
+    # Fall back to the provided comparison values if needed
+    if gs_value is None and comparison_gs is not None:
+        gs_value = comparison_gs["value"]
+    
+    if ron_value is None and comparison_ron is not None:
+        ron_value = comparison_ron["value"]
+    
+    # Now proceed with the comparison using the fetched values
+    if metric == "renters":
+        gs_text = ""
+        if value < gs_value - 1:  # 1% buffer to avoid "slightly lower" for small differences
+            gs_text = f"lower than the Greater Sydney average of {gs_value}%"
+        elif value > gs_value + 1:
+            gs_text = f"higher than the Greater Sydney average of {gs_value}%"
+        else:
+            gs_text = f"similar to the Greater Sydney average of {gs_value}%"
+            
+        ron_text = ""
+        if value < ron_value - 1:
+            ron_text = f"and lower than the Rest of NSW average of {ron_value}%"
+        elif value > ron_value + 1:
+            ron_text = f"and higher than the Rest of NSW average of {ron_value}%"
+        else:
+            ron_text = f"and similar to the Rest of NSW average of {ron_value}%"
+            
+        return f"{self.selected_geo_name} ({self.selected_geo_area}) has a concentration of renters that is {gs_text} {ron_text}."
+    
+    elif metric == "social_housing":
+        gs_text = ""
+        if value < gs_value - 0.5:  # 0.5% buffer
+            gs_text = f"lower than the Greater Sydney average of {gs_value}%"
+        elif value > gs_value + 0.5:
+            gs_text = f"higher than the Greater Sydney average of {gs_value}%"
+        else:
+            gs_text = f"similar to the Greater Sydney average of {gs_value}%"
+            
+        ron_text = ""
+        if value < ron_value - 0.5:
+            ron_text = f"and lower than the Rest of NSW average of {ron_value}%"
+        elif value > ron_value + 0.5:
+            ron_text = f"and higher than the Rest of NSW average of {ron_value}%"
+        else:
+            ron_text = f"and similar to the Rest of NSW average of {ron_value}%"
+            
+        return f"{self.selected_geo_name} ({self.selected_geo_area}) has a concentration of social housing that is {gs_text} {ron_text}."
+    
+    elif metric == "median_rent":
+        local_increase = self.data["median_rent"]["annual_increase"]
+        if pd.isna(local_increase):
+            local_increase = 0
+            
+        gs_text = ""
+        if local_increase < gs_value - 1:  # 1% buffer
+            gs_text = f"lower than Greater Sydney's annual increase of {gs_value}%"
+        elif local_increase > gs_value + 1:
+            gs_text = f"higher than Greater Sydney's annual increase of {gs_value}%"
+        else:
+            gs_text = f"similar to Greater Sydney's annual increase of {gs_value}%"
+            
+        ron_text = ""
+        if local_increase < ron_value - 1:
+            ron_text = f"and lower than Rest of NSW's annual increase of {ron_value}%"
+        elif local_increase > ron_value + 1:
+            ron_text = f"and higher than Rest of NSW's annual increase of {ron_value}%"
+        else:
+            ron_text = f"and similar to Rest of NSW's annual increase of {ron_value}%"
+            
+        return f"{self.selected_geo_name} ({self.selected_geo_area})'s median annual rental increase of {local_increase}% is {gs_text} {ron_text}."
+    
+    elif metric == "vacancy_rates":
+        current_rate = self.data["vacancy_rates"]["value"]
+        previous_rate = self.data["vacancy_rates"]["previous_year_rate"]
         
-        elif metric == "social_housing":
-            gs_text = ""
-            if value < comparison_gs["value"] - 0.5:  # 0.5% buffer
-                gs_text = f"lower than the Greater Sydney average of {comparison_gs['value']}%"
-            elif value > comparison_gs["value"] + 0.5:
-                gs_text = f"higher than the Greater Sydney average of {comparison_gs['value']}%"
-            else:
-                gs_text = f"similar to the Greater Sydney average of {comparison_gs['value']}%"
-                
-            ron_text = ""
-            if value < comparison_ron["value"] - 0.5:
-                ron_text = f"and lower than the Rest of NSW average of {comparison_ron['value']}%"
-            elif value > comparison_ron["value"] + 0.5:
-                ron_text = f"and higher than the Rest of NSW average of {comparison_ron['value']}%"
-            else:
-                ron_text = f"and similar to the Rest of NSW average of {comparison_ron['value']}%"
-                
-            return f"{self.selected_geo_name} ({self.selected_geo_area}) has a concentration of social housing that is {gs_text} {ron_text}."
+        # Format rates for display
+        current_rate_display = current_rate
+        previous_rate_display = previous_rate if previous_rate is not None else None
         
-        elif metric == "median_rent":
-            local_increase = self.data["median_rent"]["annual_increase"]
-            if pd.isna(local_increase):
-                local_increase = 0
-                
-            gs_text = ""
-            if local_increase < comparison_gs["value"] - 1:  # 1% buffer
-                gs_text = f"lower than Greater Sydney's annual increase of {comparison_gs['value']}%"
-            elif local_increase > comparison_gs["value"] + 1:
-                gs_text = f"higher than Greater Sydney's annual increase of {comparison_gs['value']}%"
+        # Generate text about market tightening/loosening if previous year data available
+        trend_text = ""
+        if previous_rate is not None:
+            if current_rate < previous_rate - 0.1:
+                trend_text = f"The vacancy rate has tightened from {previous_rate_display:.2f}% a year ago to {current_rate_display:.2f}% now. "
+            elif current_rate > previous_rate + 0.1:
+                trend_text = f"The vacancy rate has loosened from {previous_rate_display:.2f}% a year ago to {current_rate_display:.2f}% now. "
             else:
-                gs_text = f"similar to Greater Sydney's annual increase of {comparison_gs['value']}%"
-                
-            ron_text = ""
-            if local_increase < comparison_ron["value"] - 1:
-                ron_text = f"and lower than Rest of NSW's annual increase of {comparison_ron['value']}%"
-            elif local_increase > comparison_ron["value"] + 1:
-                ron_text = f"and higher than Rest of NSW's annual increase of {comparison_ron['value']}%"
-            else:
-                ron_text = f"and similar to Rest of NSW's annual increase of {comparison_ron['value']}%"
-                
-            return f"{self.selected_geo_name} ({self.selected_geo_area})'s median annual rental increase of {local_increase}% is {gs_text} {ron_text}."
+                trend_text = f"The vacancy rate has remained stable at around {current_rate_display:.2f}% compared to {previous_rate_display:.2f}% a year ago. "
         
-        elif metric == "vacancy_rates":
-            current_rate = self.data["vacancy_rates"]["value"]
-            previous_rate = self.data["vacancy_rates"]["previous_year_rate"]
-            
-            # Format rates as percentages for display (if they're in decimal format)
-            if current_rate < 1 and current_rate > 0:
-                current_rate_display = current_rate  # Already as a percentage
-            else:
-                current_rate_display = current_rate
-                
-            if previous_rate is not None:
-                if previous_rate < 1 and previous_rate > 0:
-                    previous_rate_display = previous_rate  # Already as a percentage
-                else:
-                    previous_rate_display = previous_rate
-            
-            # Generate text about market tightening/loosening if previous year data available
-            trend_text = ""
-            if previous_rate is not None:
-                if current_rate < previous_rate - 0.1:
-                    trend_text = f"The vacancy rate has tightened from {previous_rate_display:.2f}% a year ago to {current_rate_display:.2f}% now. "
-                elif current_rate > previous_rate + 0.1:
-                    trend_text = f"The vacancy rate has loosened from {previous_rate_display:.2f}% a year ago to {current_rate_display:.2f}% now. "
-                else:
-                    trend_text = f"The vacancy rate has remained stable at around {current_rate_display:.2f}% compared to {previous_rate_display:.2f}% a year ago. "
-            
-            # Add comparisons to Greater Sydney and Rest of NSW
-            comparison_text = f"For reference, Greater Sydney has experienced a change of {comparison_gs['value']}% and Rest of NSW {comparison_ron['value']}% over the past year."
-            
-            return trend_text + comparison_text
+        # Format the comparison text with the actual values
+        comparison_text = f"For reference, Greater Sydney has experienced a change of {gs_value}% and Rest of NSW {ron_value}% over the past year."
         
-        elif metric == "affordability":
-            local_pct = self.data["affordability"]["percentage"]
-            previous_year_pct = None
-            
-            if "previous_year_percentage" in self.data["affordability"] and self.data["affordability"]["previous_year_percentage"] is not None:
-                previous_year_pct = self.data["affordability"]["previous_year_percentage"]
-            
-            # Compare with Greater Sydney
-            gs_value = comparison_gs["value"] if comparison_gs["value"] is not None else 0
-            gs_comparison = ""
-            if local_pct > gs_value + 2:  # 2% buffer
-                gs_comparison = f"less affordable than the Greater Sydney average of {gs_value}%"
-            elif local_pct < gs_value - 2:
-                gs_comparison = f"more affordable than the Greater Sydney average of {gs_value}%"
-            else:
-                gs_comparison = f"similar to the Greater Sydney average of {gs_value}%"
-            
-            # Compare with Rest of NSW
-            ron_value = comparison_ron["value"] if comparison_ron["value"] is not None else 0
-            ron_comparison = ""
-            if local_pct > ron_value + 2:
-                ron_comparison = f"and less affordable than the Rest of NSW average of {ron_value}%"
-            elif local_pct < ron_value - 2:
-                ron_comparison = f"and more affordable than the Rest of NSW average of {ron_value}%"
-            else:
-                ron_comparison = f"and similar to the Rest of NSW average of {ron_value}%"
-            
-            # Evaluate the trend based on previous year percentage
-            trend_text = ""
-            if previous_year_pct is not None:
-                change = local_pct - previous_year_pct
-                
-                if abs(change) < 0.5:  # Less than 0.5% change
-                    trend_text = f"Affordability has remained relatively stable compared to {previous_year_pct}% a year ago."
-                elif change > 0:  # Deterioration (higher percentage of income)
-                    trend_text = f"Affordability has deteriorated from {previous_year_pct}% to {local_pct}% over the past year."
-                else:  # Improvement (lower percentage of income)
-                    trend_text = f"Affordability has improved from {previous_year_pct}% to {local_pct}% over the past year."
-            
-            return (f"{self.selected_geo_name} ({self.selected_geo_area}) rental affordability is {gs_comparison} {ron_comparison}. "
-                   f"{trend_text}")
+        return trend_text + comparison_text
+    
+    elif metric == "affordability":
+        local_pct = self.data["affordability"]["percentage"]
+        previous_year_pct = None
         
-        return ""
+        if "previous_year_percentage" in self.data["affordability"] and self.data["affordability"]["previous_year_percentage"] is not None:
+            previous_year_pct = self.data["affordability"]["previous_year_percentage"]
+        
+        # Get previous year values for comparison areas
+        gs_prev_value = None
+        if hasattr(self, 'comparison_data') and "Greater Sydney" in self.comparison_data and "affordability_previous" in self.comparison_data["Greater Sydney"]:
+            gs_prev_value = self.comparison_data["Greater Sydney"]["affordability_previous"]
+        
+        # Compare with Greater Sydney
+        gs_comparison = ""
+        if local_pct > gs_value + 2:  # 2% buffer
+            gs_comparison = f"less affordable than the Greater Sydney average of {gs_value}%"
+        elif local_pct < gs_value - 2:
+            gs_comparison = f"more affordable than the Greater Sydney average of {gs_value}%"
+        else:
+            gs_comparison = f"similar to the Greater Sydney average of {gs_value}%"
+        
+        # Compare with Rest of NSW
+        ron_comparison = ""
+        if local_pct > ron_value + 2:
+            ron_comparison = f"and less affordable than the Rest of NSW average of {ron_value}%"
+        elif local_pct < ron_value - 2:
+            ron_comparison = f"and more affordable than the Rest of NSW average of {ron_value}%"
+        else:
+            ron_comparison = f"and similar to the Rest of NSW average of {ron_value}%"
+        
+        # Evaluate the trend based on previous year percentage
+        trend_text = ""
+        if previous_year_pct is not None:
+            if abs(local_pct - previous_year_pct) < 1.0:  # Less than 1% change
+                trend_text = f" Affordability has remained relatively stable compared to {previous_year_pct}% a year ago."
+            elif local_pct > previous_year_pct:  # Deterioration (higher percentage of income)
+                trend_text = f" Affordability has deteriorated from {previous_year_pct}% to {local_pct}% over the past year."
+            else:  # Improvement (lower percentage of income)
+                trend_text = f" Affordability has improved from {previous_year_pct}% to {local_pct}% over the past year."
+        
+        return f"{self.selected_geo_name} ({self.selected_geo_area}) rental affordability is {gs_comparison} {ron_comparison}.{trend_text}"
+    
+    return ""
     
     def create_excel_output(self):
         """Create a nicely formatted Excel output with the analysis"""
@@ -1849,9 +2004,12 @@ def main():
             
             # Generate button
             if st.button("Generate Analysis", type="primary"):
-                with st.spinner("Analyzing rental data..."):
-                    # First collect reference data
-                    collect_reference_data(analyzer, uploaded_files)
+    with st.spinner("Analyzing rental data..."):
+        # First fetch actual comparison data for Greater Sydney and Rest of NSW
+        comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
+        
+        # Then collect data and analyze the selected area
+        analyzer.collect_data(uploaded_files)
                     
                     # Then collect data and analyze
                     analyzer.collect_data(uploaded_files)
