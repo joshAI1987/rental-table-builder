@@ -2002,11 +2002,11 @@ def main():
         if analyzer.selected_geo_area and analyzer.selected_geo_name:
             st.header("Analysis Options")
             
-            # Generate button
-            if st.button("Generate Analysis", type="primary"):
-    with st.spinner("Analyzing rental data..."):
-        # First fetch actual comparison data for Greater Sydney and Rest of NSW
-        comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
+        # Generate button
+    if st.button("Generate Analysis", type="primary"):
+        with st.spinner("Analyzing rental data..."):
+            # First fetch actual comparison data for Greater Sydney and Rest of NSW
+            comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
         
         # Then collect data and analyze the selected area
         analyzer.collect_data(uploaded_files)
