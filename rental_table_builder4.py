@@ -2002,106 +2002,132 @@ def main():
         if analyzer.selected_geo_area and analyzer.selected_geo_name:
             st.header("Analysis Options")
             
-        # Generate button
-    if st.button("Generate Analysis", type="primary"):
-        with st.spinner("Analyzing rental data..."):
-            # First fetch actual comparison data for Greater Sydney and Rest of NSW
-            comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
+       # Generate button
+if st.button("Generate Analysis", type="primary"):
+    with st.spinner("Analyzing rental data..."):
+        # First fetch actual comparison data for Greater Sydney and Rest of NSW
+        comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
         
         # Then collect data and analyze the selected area
         analyzer.collect_data(uploaded_files)
+        
+        # Create tabs for different views
+        tab1, tab2 = st.tabs(["Analysis Summary", "Raw Data"])
+        
+        with tab1:
+            st.subheader(f"Rental Market Analysis for {analyzer.selected_geo_name} ({analyzer.selected_geo_area})")
+            
+            # Display summary cards
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            
+            with metric_col1:
+                # Remove delta for renters count since it's a static number
+                st.metric(
+                    label="Renters", 
+                    value=f"{analyzer.data['renters']['percentage']}%"
+                )
+                st.write(f"{analyzer.data['renters']['count']:,} households")
+                
+                # Remove delta for social housing count since it's a static number
+                st.metric(
+                    label="Social Housing", 
+                    value=f"{analyzer.data['social_housing']['percentage']}%"
+                )
+                st.write(f"{analyzer.data['social_housing']['count']:,} dwellings")
+            
+            with metric_col2:
+                st.metric(
+                    label="Median Weekly Rent", 
+                    value=f"${analyzer.data['median_rent']['value']}",
+                    delta=f"{analyzer.data['median_rent']['annual_increase']}% annual increase"
+                )
+                
+                # Format vacancy rate for display
+                vacancy_value = analyzer.data['vacancy_rates']['value']
+                if vacancy_value < 1 and vacancy_value > 0:
+                    vacancy_display = f"{vacancy_value:.2f}%"
+                else:
+                    vacancy_display = f"{vacancy_value:.2f}%"
                     
-                    # Then collect data and analyze
-                    analyzer.collect_data(uploaded_files)
-                    
-                    # Create tabs for different views
-                    tab1, tab2 = st.tabs(["Analysis Summary", "Raw Data"])
-                    
-                    with tab1:
-                        st.subheader(f"Rental Market Analysis for {analyzer.selected_geo_name} ({analyzer.selected_geo_area})")
-                        
-                        # Display summary cards
-                        metric_col1, metric_col2, metric_col3 = st.columns(3)
-                        
-                        with metric_col1:
-                            # Remove delta for renters count since it's a static number
-                            st.metric(
-                                label="Renters", 
-                                value=f"{analyzer.data['renters']['percentage']}%"
-                            )
-                            st.write(f"{analyzer.data['renters']['count']:,} households")
-                            
-                            # Remove delta for social housing count since it's a static number
-                            st.metric(
-                                label="Social Housing", 
-                                value=f"{analyzer.data['social_housing']['percentage']}%"
-                            )
-                            st.write(f"{analyzer.data['social_housing']['count']:,} dwellings")
-                        
-                        with metric_col2:
-                            st.metric(
-                                label="Median Weekly Rent", 
-                                value=f"${analyzer.data['median_rent']['value']}",
-                                delta=f"{analyzer.data['median_rent']['annual_increase']}% annual increase"
-                            )
-                            
-                            # Format vacancy rate for display
-                            vacancy_value = analyzer.data['vacancy_rates']['value']
-                            if vacancy_value < 1 and vacancy_value > 0:
-                                vacancy_display = f"{vacancy_value:.2f}%"
-                            else:
-                                vacancy_display = f"{vacancy_value:.2f}%"
-                                
-                            st.metric(
-                                label="Vacancy Rate", 
-                                value=vacancy_display,
-                                delta=None
-                            )
-                            
-                            # Show previous year rate
-                            if analyzer.data['vacancy_rates']['previous_year_rate'] is not None:
-                                prev_rate = analyzer.data['vacancy_rates']['previous_year_rate']
-                                if prev_rate < 1 and prev_rate > 0:
-                                    prev_display = f"{prev_rate:.2f}%"
-                                else:
-                                    prev_display = f"{prev_rate:.2f}%"
-                                st.write(f"Was {prev_display} a year ago")
-                        
-                        with metric_col3:
-                            st.metric(
-                                label="Rental Affordability", 
-                                value=f"{analyzer.data['affordability']['percentage']}% of income"
-                            )
-                            
-                            # Show previous year value instead of improvement/deterioration
-                            if "previous_year_percentage" in analyzer.data['affordability']:
-                                st.write(f"Was {analyzer.data['affordability']['previous_year_percentage']}% of income a year ago")
-                            elif "annual_improvement" in analyzer.data['affordability'] and analyzer.data['affordability']['annual_improvement'] != 0:
-                                current = analyzer.data['affordability']['percentage']
-                                improvement = analyzer.data['affordability']['annual_improvement']
-                                previous = current + improvement if improvement < 0 else current - improvement
-                                st.write(f"Was {previous:.1f}% of income a year ago")
-                            else:
-                                st.write("Previous year data not available")
-                        
-                        # Display comparison comments
-                        st.subheader("Comparative Analysis")
-                        
-                        st.info(analyzer.generate_comparison_comment("renters", analyzer.data['renters']['percentage'], 
-                                                    analyzer.data['renters']['comparison_gs'], analyzer.data['renters']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("social_housing", analyzer.data['social_housing']['percentage'], 
-                                                    analyzer.data['social_housing']['comparison_gs'], analyzer.data['social_housing']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
-                                                    analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("vacancy_rates", analyzer.data['vacancy_rates']['value'], 
-                                                    analyzer.data['vacancy_rates']['comparison_gs'], analyzer.data['vacancy_rates']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("affordability", analyzer.data['affordability']['percentage'], 
-                                                    analyzer.data['affordability']['comparison_gs'], analyzer.data['affordability']['comparison_ron']))
-                        
+                st.metric(
+                    label="Vacancy Rate", 
+                    value=vacancy_display,
+                    delta=None
+                )
+                
+                # Show previous year rate
+                if analyzer.data['vacancy_rates']['previous_year_rate'] is not None:
+                    prev_rate = analyzer.data['vacancy_rates']['previous_year_rate']
+                    if prev_rate < 1 and prev_rate > 0:
+                        prev_display = f"{prev_rate:.2f}%"
+                    else:
+                        prev_display = f"{prev_rate:.2f}%"
+                    st.write(f"Was {prev_display} a year ago")
+            
+            with metric_col3:
+                st.metric(
+                    label="Rental Affordability", 
+                    value=f"{analyzer.data['affordability']['percentage']}% of income"
+                )
+                
+                # Show previous year value instead of improvement/deterioration
+                if "previous_year_percentage" in analyzer.data['affordability']:
+                    st.write(f"Was {analyzer.data['affordability']['previous_year_percentage']}% of income a year ago")
+                elif "annual_improvement" in analyzer.data['affordability'] and analyzer.data['affordability']['annual_improvement'] != 0:
+                    current = analyzer.data['affordability']['percentage']
+                    improvement = analyzer.data['affordability']['annual_improvement']
+                    previous = current + improvement if improvement < 0 else current - improvement
+                    st.write(f"Was {previous:.1f}% of income a year ago")
+                else:
+                    st.write("Previous year data not available")
+            
+            # Display comparison comments
+            st.subheader("Comparative Analysis")
+            
+            st.info(analyzer.generate_comparison_comment("renters", analyzer.data['renters']['percentage'], 
+                                        analyzer.data['renters']['comparison_gs'], analyzer.data['renters']['comparison_ron']))
+            
+            st.info(analyzer.generate_comparison_comment("social_housing", analyzer.data['social_housing']['percentage'], 
+                                        analyzer.data['social_housing']['comparison_gs'], analyzer.data['social_housing']['comparison_ron']))
+            
+            st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
+                                        analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
+            
+            st.info(analyzer.generate_comparison_comment("vacancy_rates", analyzer.data['vacancy_rates']['value'], 
+                                        analyzer.data['vacancy_rates']['comparison_gs'], analyzer.data['vacancy_rates']['comparison_ron']))
+            
+            st.info(analyzer.generate_comparison_comment("affordability", analyzer.data['affordability']['percentage'], 
+                                        analyzer.data['affordability']['comparison_gs'], analyzer.data['affordability']['comparison_ron']))
+            
+            # Generate Excel file
+            excel_data = analyzer.create_excel_output()
+            
+            # Provide a download button for the Excel file
+            st.download_button(
+                label="Download Excel Report",
+                data=excel_data,
+                file_name=f"{analyzer.selected_geo_name}_{analyzer.selected_geo_area}_Rental_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        
+        with tab2:
+            st.subheader("Raw Data")
+            
+            # Display raw data in expandable sections
+            with st.expander("Renters Data"):
+                st.json(analyzer.data["renters"])
+            
+            with st.expander("Social Housing Data"):
+                st.json(analyzer.data["social_housing"])
+            
+            with st.expander("Median Rent Data"):
+                st.json(analyzer.data["median_rent"])
+            
+            with st.expander("Vacancy Rate Data"):
+                st.json(analyzer.data["vacancy_rates"])
+            
+            with st.expander("Affordability Data"):
+                st.json(analyzer.data["affordability"])                        
                         # Generate Excel file
                         excel_data = analyzer.create_excel_output()
                         
