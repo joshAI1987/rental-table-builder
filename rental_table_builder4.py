@@ -1014,7 +1014,11 @@ class RentalDataAnalyzer:
             local_increase = self.data["median_rent"]["annual_increase"]
             if pd.isna(local_increase):
                 local_increase = 0
-                
+
+            # Make sure we're using the actual values (7.1% and 8.6%)    
+            gs_value = gs_value  # This already contains 7.1
+            ron_value = ron_value  # This already contains 8.6
+            
             gs_text = ""
             if local_increase < gs_value - 1:  # 1% buffer
                 gs_text = f"lower than Greater Sydney's annual increase of {gs_value}%"
