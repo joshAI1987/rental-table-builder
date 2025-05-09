@@ -1640,8 +1640,8 @@ def main():
                         st.info(analyzer.generate_comparison_comment("social_housing", analyzer.data['social_housing']['percentage'], 
                                                     analyzer.data['social_housing']['comparison_gs'], analyzer.data['social_housing']['comparison_ron']))
                         
-                        st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
-                                                    analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
+                        # st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
+                        #                            analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
                         
                         st.info(analyzer.generate_comparison_comment("vacancy_rates", analyzer.data['vacancy_rates']['value'], 
                                                     analyzer.data['vacancy_rates']['comparison_gs'], analyzer.data['vacancy_rates']['comparison_ron']))
