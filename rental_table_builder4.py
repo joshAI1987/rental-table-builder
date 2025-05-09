@@ -2002,7 +2002,7 @@ def main():
         if analyzer.selected_geo_area and analyzer.selected_geo_name:
             st.header("Analysis Options")
             
-       # Generate button
+# Generate button
 if st.button("Generate Analysis", type="primary"):
     with st.spinner("Analyzing rental data..."):
         # First fetch actual comparison data for Greater Sydney and Rest of NSW
@@ -2127,41 +2127,12 @@ if st.button("Generate Analysis", type="primary"):
                 st.json(analyzer.data["vacancy_rates"])
             
             with st.expander("Affordability Data"):
-                st.json(analyzer.data["affordability"])                        
-                        # Generate Excel file
-                        excel_data = analyzer.create_excel_output()
-                        
-                        # Provide a download button for the Excel file
-                        st.download_button(
-                            label="Download Excel Report",
-                            data=excel_data,
-                            file_name=f"{analyzer.selected_geo_name}_{analyzer.selected_geo_area}_Rental_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    
-                    with tab2:
-                        st.subheader("Raw Data")
-                        
-                        # Display raw data in expandable sections
-                        with st.expander("Renters Data"):
-                            st.json(analyzer.data["renters"])
-                        
-                        with st.expander("Social Housing Data"):
-                            st.json(analyzer.data["social_housing"])
-                        
-                        with st.expander("Median Rent Data"):
-                            st.json(analyzer.data["median_rent"])
-                        
-                        with st.expander("Vacancy Rate Data"):
-                            st.json(analyzer.data["vacancy_rates"])
-                        
-                        with st.expander("Affordability Data"):
-                            st.json(analyzer.data["affordability"])
+                st.json(analyzer.data["affordability"])
 
-    # Add footnote and info
-    st.markdown("---")
-    st.caption("* Methodology: Rental affordability is calculated by taking median weekly rental household incomes and comparing to median weekly rents. Any number higher than 30% of income on rent is considered rental stress.")
-    st.caption("Source: NSW Fair Trading using ABS Census and Core Logic rental data")
+# Add footnote and info - THIS SHOULD BE OUTSIDE THE BUTTON CALLBACK
+st.markdown("---")
+st.caption("* Methodology: Rental affordability is calculated by taking median weekly rental household incomes and comparing to median weekly rents. Any number higher than 30% of income on rent is considered rental stress.")
+st.caption("Source: NSW Fair Trading using ABS Census and Core Logic rental data")
 
 if __name__ == "__main__":
     main()
