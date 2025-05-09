@@ -56,20 +56,20 @@ class RentalDataAnalyzer:
         
         # Reference data for comparison - will be calculated dynamically
         self.GS_REFERENCE_DATA = {
-            "renters": {"area": "Greater Sydney", "value": None},
-            "social_housing": {"area": "Greater Sydney", "value": None},
-            "median_rent": {"area": "Greater Sydney", "value": None},
-            "vacancy_rates": {"area": "Greater Sydney", "value": None},
-            "affordability": {"area": "Greater Sydney", "value": None, "annual_change": None, "previous_value": None}
+            "renters": {"area": "Greater Sydney", "value": 35.9},
+            "social_housing": {"area": "Greater Sydney", "value": 4.2},
+            "median_rent": {"area": "Greater Sydney", "value": 7.1},
+            "vacancy_rates": {"area": "Greater Sydney", "value": 0.16},
+            "affordability": {"area": "Greater Sydney", "value": 33, "annual_change": None, "previous_value": 32.3}
         }
         
         # Reference data for comparison - will be calculated dynamically
         self.RON_REFERENCE_DATA = {
-            "renters": {"area": "Rest of NSW", "value": None},
-            "social_housing": {"area": "Rest of NSW", "value": None},
-            "median_rent": {"area": "Rest of NSW", "value": None},
-            "vacancy_rates": {"area": "Rest of NSW", "value": None},
-            "affordability": {"area": "Rest of NSW", "value": None, "annual_change": None, "previous_value": None}
+            "renters": {"area": "Rest of NSW", "value": 26.8},
+            "social_housing": {"area": "Rest of NSW", "value": 4},
+            "median_rent": {"area": "Rest of NSW", "value": 8.6},
+            "vacancy_rates": {"area": "Rest of NSW", "value": -0.29},
+            "affordability": {"area": "Rest of NSW", "value": 41.7, "annual_change": None, "previous_value": 40.3}
         }
         
         # Variables to store selections and data
