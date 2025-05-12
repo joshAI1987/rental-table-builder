@@ -907,3 +907,224 @@ class RentalDataAnalyzer:
             # Ensure comparison data is attached
             self.data["affordability"]["comparison_gs"] = self.GS_REFERENCE_DATA["affordability"]
             self.data["affordability"]["comparison_ron"] = self.RON_REFERENCE_DATA["affordability"]
+
+# Add this code to the end of your rental_table_builder4.py file
+
+# Initialize the analyzer
+analyzer = RentalDataAnalyzer()
+
+# Create UI layout
+st.title("NSW Rental Data Analyzer")
+st.markdown("This application analyzes rental data for NSW regions and generates comparison reports.")
+
+# Sidebar for controls
+st.sidebar.header("Data Selection")
+
+# Input for root folder path
+root_folder = st.sidebar.text_input("Enter the path to your data folder:", ".")
+
+# Add a button to scan the root folder
+if st.sidebar.button("Scan Root Folder"):
+    files_dict = analyzer.scan_root_folder(root_folder)
+    
+    # Check if any files were found
+    if sum(len(files) for files in files_dict.values()) > 0:
+        # Load all data
+        with st.spinner("Loading data files..."):
+            analyzer.load_all_data()
+        
+        st.success("Data loaded successfully!")
+    else:
+        st.warning("No data files found. Please check the root folder path.")
+
+# Check if data is loaded
+if hasattr(analyzer, 'dataframes') and any(analyzer.dataframes.values()):
+    # Get available geographic areas
+    available_geo_areas = analyzer.get_available_geo_areas()
+    
+    if available_geo_areas:
+        # Create a selectbox for geo areas
+        selected_geo_area = st.sidebar.selectbox(
+            "Select Geographic Area Type:",
+            available_geo_areas
+        )
+        
+        # Get geographic names for the selected area
+        geo_names = analyzer.get_geo_names(selected_geo_area)
+        
+        if geo_names:
+            # Create a selectbox for geo names
+            selected_geo_name = st.sidebar.selectbox(
+                f"Select {selected_geo_area.title()} Name:",
+                geo_names
+            )
+            
+            # Add a button to collect data for the selected area
+            if st.sidebar.button("Generate Analysis"):
+                with st.spinner(f"Analyzing data for {selected_geo_name}..."):
+                    data = analyzer.collect_data_for_area(selected_geo_area, selected_geo_name)
+                
+                # Display the data
+                st.header(f"Rental Analysis for {selected_geo_name}")
+                
+                # Create 2-column layout for key metrics
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Rental Households
+                    st.subheader("Rental Households")
+                    renters_data = data.get("renters", {})
+                    st.metric(
+                        label=f"Renters ({renters_data.get('period', 'N/A')})",
+                        value=f"{renters_data.get('percentage', 'N/A')}%",
+                        delta=f"{renters_data.get('percentage', 0) - renters_data.get('comparison_gs', {}).get('value', 0):.1f}% vs Greater Sydney"
+                    )
+                    st.write(f"Number of rental households: {renters_data.get('count', 'N/A'):,}")
+                    
+                    # Median Rent
+                    st.subheader("Median Rent")
+                    rent_data = data.get("median_rent", {})
+                    st.metric(
+                        label=f"Weekly Rent ({rent_data.get('period', 'N/A')})",
+                        value=f"${rent_data.get('value', 'N/A')}",
+                        delta=f"{rent_data.get('annual_increase', 'N/A')}% annual increase"
+                    )
+                    if rent_data.get('previous_year_rent'):
+                        st.write(f"Previous year: ${rent_data.get('previous_year_rent'):,}")
+
+                with col2:
+                    # Vacancy Rates
+                    st.subheader("Vacancy Rates")
+                    vacancy_data = data.get("vacancy_rates", {})
+                    st.metric(
+                        label=f"Vacancy Rate ({vacancy_data.get('period', 'N/A')})",
+                        value=f"{vacancy_data.get('value', 0) * 100:.2f}%",
+                        delta=f"{(vacancy_data.get('value', 0) - vacancy_data.get('previous_year_rate', 0)) * 100:.2f}% since last year",
+                        delta_color="normal"
+                    )
+                    
+                    # Affordability
+                    st.subheader("Rental Affordability")
+                    affordability_data = data.get("affordability", {})
+                    st.metric(
+                        label=f"Rental Affordability ({affordability_data.get('period', 'N/A')})",
+                        value=f"{affordability_data.get('percentage', 'N/A')}%",
+                        delta=f"{affordability_data.get('percentage', 0) - affordability_data.get('previous_year_percentage', 0):.1f}% since last year",
+                        delta_color="inverse"  # Lower is better for affordability
+                    )
+                    st.write("(% of income spent on rent)")
+
+                # Display time series charts if available
+                st.header("Time Series Data")
+                
+                # Check if we have time series data
+                has_time_series = any(
+                    data.get(metric, {}).get('time_series') 
+                    for metric in ['median_rent', 'vacancy_rates', 'affordability']
+                )
+                
+                if has_time_series:
+                    # Create tabs for different time series
+                    tabs = st.tabs(["Median Rent", "Vacancy Rates", "Affordability"])
+                    
+                    # Median Rent Tab
+                    with tabs[0]:
+                        rent_series = data.get("median_rent", {}).get("time_series")
+                        if rent_series:
+                            # Convert to dataframe for plotting
+                            df_rent = pd.DataFrame(rent_series)
+                            df_rent['date'] = pd.to_datetime(df_rent['date'])
+                            
+                            # Create the chart
+                            fig = px.line(
+                                df_rent, 
+                                x='date', 
+                                y='value', 
+                                title=f"Median Weekly Rent for {selected_geo_name}",
+                                labels={'value': 'Median Rent ($)', 'date': 'Date'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No time series data available for median rent.")
+                    
+                    # Vacancy Rates Tab
+                    with tabs[1]:
+                        vacancy_series = data.get("vacancy_rates", {}).get("time_series")
+                        if vacancy_series:
+                            # Convert to dataframe for plotting
+                            df_vacancy = pd.DataFrame(vacancy_series)
+                            df_vacancy['date'] = pd.to_datetime(df_vacancy['date'])
+                            
+                            # Convert to percentage for display
+                            df_vacancy['value_pct'] = df_vacancy['value'] * 100
+                            
+                            # Create the chart
+                            fig = px.line(
+                                df_vacancy, 
+                                x='date', 
+                                y='value_pct', 
+                                title=f"Vacancy Rate for {selected_geo_name}",
+                                labels={'value_pct': 'Vacancy Rate (%)', 'date': 'Date'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No time series data available for vacancy rates.")
+                    
+                    # Affordability Tab
+                    with tabs[2]:
+                        affordability_series = data.get("affordability", {}).get("time_series")
+                        if affordability_series:
+                            # Convert to dataframe for plotting
+                            df_afford = pd.DataFrame(affordability_series)
+                            df_afford['date'] = pd.to_datetime(df_afford['date'])
+                            
+                            # Create the chart
+                            fig = px.line(
+                                df_afford, 
+                                x='date', 
+                                y='value', 
+                                title=f"Rental Affordability for {selected_geo_name}",
+                                labels={'value': 'Affordability (%)', 'date': 'Date'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No time series data available for affordability.")
+                else:
+                    st.info("No time series data available for visualization.")
+                    
+                # Comparison section
+                st.header("Comparison with Greater Sydney and Rest of NSW")
+                
+                # Create comparison table
+                comparison_data = {
+                    "Metric": ["Rental Households (%)", "Social Housing (%)", "Median Rent Annual Growth (%)", "Vacancy Rate (%)", "Rental Affordability (%)"],
+                    selected_geo_name: [
+                        f"{data.get('renters', {}).get('percentage', 'N/A')}%",
+                        f"{data.get('social_housing', {}).get('percentage', 'N/A')}%",
+                        f"{data.get('median_rent', {}).get('annual_increase', 'N/A')}%",
+                        f"{data.get('vacancy_rates', {}).get('value', 0) * 100:.2f}%",
+                        f"{data.get('affordability', {}).get('percentage', 'N/A')}%"
+                    ],
+                    "Greater Sydney": [
+                        f"{data.get('renters', {}).get('comparison_gs', {}).get('value', 'N/A')}%",
+                        f"{data.get('social_housing', {}).get('comparison_gs', {}).get('value', 'N/A')}%",
+                        f"{data.get('median_rent', {}).get('comparison_gs', {}).get('value', 'N/A')}%",
+                        f"{data.get('vacancy_rates', {}).get('comparison_gs', {}).get('value', 0) * 100:.2f}%",
+                        f"{data.get('affordability', {}).get('comparison_gs', {}).get('value', 'N/A')}%"
+                    ],
+                    "Rest of NSW": [
+                        f"{data.get('renters', {}).get('comparison_ron', {}).get('value', 'N/A')}%",
+                        f"{data.get('social_housing', {}).get('comparison_ron', {}).get('value', 'N/A')}%",
+                        f"{data.get('median_rent', {}).get('comparison_ron', {}).get('value', 'N/A')}%",
+                        f"{data.get('vacancy_rates', {}).get('comparison_ron', {}).get('value', 0) * 100:.2f}%",
+                        f"{data.get('affordability', {}).get('comparison_ron', {}).get('value', 'N/A')}%"
+                    ]
+                }
+                
+                # Display comparison table
+                st.table(pd.DataFrame(comparison_data))
+                
+        else:
+            st.warning(f"No geographic names found for {selected_geo_area}. Try selecting a different geographic area type.")
+else:
+    st.info("Please scan a root folder to load data.")
