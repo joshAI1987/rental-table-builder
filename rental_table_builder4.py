@@ -668,6 +668,286 @@ class RentalDataAnalyzer:
             
             # Ensure comparison data is attached
             self.data["affordability"]["comparison_gs"] = self.GS_REFERENCE_DATA["affordability"]
+            self.data["affordability"]["comparison_ron"] = self.RON_REFERENCE_DATA["affordability"] = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # If we have a month column, get the most recent month
+                        latest_month = None
+                        if 'month' in df_filtered.columns:
+                            df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
+                            latest_month = df_filtered['month'].max()
+                            df_latest = df_filtered[df_filtered['month'] == latest_month]
+                        else:
+                            df_latest = df_filtered
+                        
+                        # Find vacancy rate column
+                        rate_col = None
+                        if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
+                            rate_col = 'rental_vacancy_rate_3m_smoothed'
+                        else:
+                            # Fallback to other columns
+                            for col_name in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
+                                if col_name in df_latest.columns:
+                                    rate_col = col_name
+                                    break
+                        
+                        if not rate_col:
+                            # If still no rate column found, try more generic search
+                            for col in df_latest.columns:
+                                if 'vacancy' in col.lower() and ('rate' in col.lower() or 'pct' in col.lower() or 'percent' in col.lower()):
+                                    rate_col = col
+                                    break
+                        
+                        # Get previous year rate
+                        previous_year_rate = None
+                        if 'month' in df_filtered.columns and rate_col:
+                            try:
+                                # Get current month's value
+                                current_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
+                                
+                                # Try to find data from a year ago
+                                one_year_ago = latest_month - pd.DateOffset(months=12)
+                                year_ago_data = df_filtered[df_filtered['month'] == one_year_ago]
+                                
+                                if not year_ago_data.empty and rate_col in year_ago_data.columns:
+                                    year_ago_value = float(year_ago_data[rate_col].iloc[0]) if not pd.isna(year_ago_data[rate_col].iloc[0]) else 0
+                                    previous_year_rate = year_ago_value
+                                else:
+                                    # If exact month not found, try to find closest month before
+                                    prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
+                                    if not prior_months.empty:
+                                        closest_prior = prior_months.max()
+                                        closest_data = df_filtered[df_filtered['month'] == closest_prior]
+                                        if not closest_data.empty and rate_col in closest_data.columns:
+                                            prior_value = float(closest_data[rate_col].iloc[0]) if not pd.isna(closest_data[rate_col].iloc[0]) else 0
+                                            previous_year_rate = prior_value
+                            except Exception as e:
+                                st.warning(f"Error getting previous year vacancy rate: {str(e)}")
+                        
+                        # Extract data
+                        if rate_col and len(df_latest) > 0:
+                            if rate_col in df_latest.columns:
+                                rate_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
+                                
+                                self.data["vacancy_rates"] = {
+                                    "value": rate_value,
+                                    "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
+                                    "source": "NSW Fair Trading Prop Track Data",
+                                    "previous_year_rate": previous_year_rate,
+                                    "comparison_gs": self.GS_REFERENCE_DATA["vacancy_rates"],
+                                    "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"],
+                                    "time_series": self.extract_time_series_data(df_filtered, rate_col)
+                                }
+        except Exception as e:
+            st.error(f"Error collecting vacancy rate data: {str(e)}")
+    
+    def collect_affordability_data(self):
+        """Collect affordability data"""
+        try:
+            # Check if we have affordability data for the selected geo area
+            if self.selected_geo_area in self.dataframes["affordability"]:
+                df = self.dataframes["affordability"][self.selected_geo_area]
+                
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                
+                if geo_col:
+                    # Ensure both values are strings for comparison
+                    df[geo_col] = df[geo_col].astype(str)
+                    selected_name_str = str(self.selected_geo_name)
+                    
+                    # Check for exact match
+                    df_filtered = df[df[geo_col] == selected_name_str]
+                    if df_filtered.empty:
+                        # Try partial match
+                        matches = []
+                        for value in df[geo_col].dropna().unique():
+                            if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
+                                matches.append(value)
+                        
+                        if matches:
+                            best_match = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # If we have a month column, get the most recent month
+                        latest_month = None
+                        previous_year_month = None
+                        previous_year_pct = None
+                        
+                        if 'month' in df_filtered.columns:
+                            df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
+                            latest_month = df_filtered['month'].max()
+                            df_latest = df_filtered[df_filtered['month'] == latest_month]
+                            
+                            # Try to find data from a year ago
+                            one_year_ago = latest_month - pd.DateOffset(months=12)
+                            
+                            # Try exact match for one year ago
+                            df_year_ago = df_filtered[df_filtered['month'] == one_year_ago]
+                            
+                            # If not found, try to find the closest month before that date
+                            if df_year_ago.empty:
+                                prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
+                                if not prior_months.empty:
+                                    closest_prior_month = prior_months.max()
+                                    df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
+                                    previous_year_month = closest_prior_month
+                            else:
+                                previous_year_month = one_year_ago
+                        else:
+                            df_latest = df_filtered
+                            df_year_ago = pd.DataFrame()  # Empty DataFrame if no month column
+                            
+                        # Find affordability column - look for keywords
+                        pct_col = None
+                        
+                        # First priority: direct affordability columns
+                        affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
+                        if affordability_columns:
+                            # Prefer 3-month affordability for stability
+                            if 'rental_affordability_3mo' in affordability_columns:
+                                pct_col = 'rental_affordability_3mo'
+                            elif 'rental_affordability_1mo' in affordability_columns:
+                                pct_col = 'rental_affordability_1mo'
+                            else:
+                                pct_col = affordability_columns[0]  # Take the first one if no preferred column
+                        
+                        # If no direct affordability column, try to find rent-to-income ratio
+                        if not pct_col:
+                            for keywords in [['rent', 'income'], ['rental', 'affordability'], ['income', 'rent']]:
+                                for col in df_latest.columns:
+                                    if all(keyword.lower() in col.lower() for keyword in keywords):
+                                        pct_col = col
+                                        break
+                                if pct_col:
+                                    break
+                        
+                        # Extract current affordability value
+                        if pct_col and len(df_latest) > 0:
+                            pct_value = float(df_latest[pct_col].iloc[0]) if not pd.isna(df_latest[pct_col].iloc[0]) else 0
+                            
+                            # Ensure the value is properly formatted as a percentage
+                            if pct_value > 0 and pct_value < 1:
+                                pct_value = pct_value * 100  # Convert decimal to percentage
+                            
+                            # Get previous year value if available from year-ago data
+                            if not df_year_ago.empty and pct_col in df_year_ago.columns:
+                                prev_value = float(df_year_ago[pct_col].iloc[0]) if not pd.isna(df_year_ago[pct_col].iloc[0]) else None
+                                if prev_value is not None:
+                                    # Ensure previous value is also formatted as percentage
+                                    if prev_value > 0 and prev_value < 1:
+                                        prev_value = prev_value * 100
+                                    previous_year_pct = prev_value
+                            
+                            # Calculate improvement (for comparison purposes)
+                            annual_improvement = None
+                            if previous_year_pct is not None and previous_year_pct > 0:
+                                # For affordability, a decrease is an improvement
+                                annual_improvement = pct_value - previous_year_pct
+                            
+                            self.data["affordability"] = {
+                                "percentage": round(pct_value, 1),
+                                "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
+                                "source": "NSW Fair Trading Prop Track Data",
+                                "previous_year_percentage": round(previous_year_pct, 1) if previous_year_pct is not None else None,
+                                "annual_improvement": round(annual_improvement, 2) if annual_improvement is not None else 0,
+                                "comparison_gs": self.GS_REFERENCE_DATA["affordability"],
+                                "comparison_ron": self.RON_REFERENCE_DATA["affordability"],
+                                "time_series": self.extract_time_series_data(df_filtered, pct_col)
+                            }
+        except Exception as e:
+            st.error(f"Error collecting affordability data: {str(e)}")
+    
+    def ensure_default_data(self):
+        """Ensure all required data is available (use defaults if missing)"""
+        # Only use defaults if absolutely necessary, but always maintain comparison data
+        if "renters" not in self.data:
+            self.data["renters"] = {
+                "percentage": 25.5,
+                "count": 8402,
+                "period": "2021",
+                "source": "ABS Census",
+                "comparison_gs": self.GS_REFERENCE_DATA["renters"],
+                "comparison_ron": self.RON_REFERENCE_DATA["renters"]
+            }
+        else:
+            # Ensure comparison data is attached
+            self.data["renters"]["comparison_gs"] = self.GS_REFERENCE_DATA["renters"]
+            self.data["renters"]["comparison_ron"] = self.RON_REFERENCE_DATA["renters"]
+            
+        if "social_housing" not in self.data:
+            self.data["social_housing"] = {
+                "percentage": 2.8,
+                "count": 938,
+                "period": "2021",
+                "source": "ABS Census",
+                "comparison_gs": self.GS_REFERENCE_DATA["social_housing"],
+                "comparison_ron": self.RON_REFERENCE_DATA["social_housing"]
+            }
+        else:
+            # Ensure comparison data is attached
+            self.data["social_housing"]["comparison_gs"] = self.GS_REFERENCE_DATA["social_housing"]
+            self.data["social_housing"]["comparison_ron"] = self.RON_REFERENCE_DATA["social_housing"]
+            
+        if "median_rent" not in self.data:
+            self.data["median_rent"] = {
+                "value": 595,
+                "period": "Apr-25",
+                "source": "NSW Fair Trading Corelogic Data",
+                "annual_increase": 10.2,
+                "previous_year_rent": 540,
+                "comparison_gs": self.GS_REFERENCE_DATA["median_rent"],
+                "comparison_ron": self.RON_REFERENCE_DATA["median_rent"],
+                "time_series": None
+            }
+        else:
+            # Ensure comparison data is attached
+            self.data["median_rent"]["comparison_gs"] = self.GS_REFERENCE_DATA["median_rent"]
+            self.data["median_rent"]["comparison_ron"] = self.RON_REFERENCE_DATA["median_rent"]
+            
+        if "vacancy_rates" not in self.data:
+            # Only use default as last resort
+            self.data["vacancy_rates"] = {
+                "value": 0.72,  # Stored as decimal
+                "period": "Apr-25",
+                "source": "NSW Fair Trading Prop Track Data",
+                "previous_year_rate": 1.0,  # Previous year also as decimal
+                "comparison_gs": self.GS_REFERENCE_DATA["vacancy_rates"],
+                "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"],
+                "time_series": None
+            }
+        else:
+            # Ensure comparison data is attached
+            self.data["vacancy_rates"]["comparison_gs"] = self.GS_REFERENCE_DATA["vacancy_rates"]
+            self.data["vacancy_rates"]["comparison_ron"] = self.RON_REFERENCE_DATA["vacancy_rates"]
+            
+        if "affordability" not in self.data:
+            self.data["affordability"] = {
+                "percentage": 43.6,
+                "period": "Apr-25",
+                "source": "NSW Fair Trading Prop Track Data",
+                "previous_year_percentage": 43.6,  # Store previous year value instead of improvement
+                "comparison_gs": self.GS_REFERENCE_DATA["affordability"],
+                "comparison_ron": self.RON_REFERENCE_DATA["affordability"],
+                "time_series": None
+            }
+        else:
+            # Ensure we have previous year percentage
+            if "previous_year_percentage" not in self.data["affordability"] and "annual_improvement" in self.data["affordability"]:
+                # Calculate previous year value if we have annual improvement
+                current = self.data["affordability"]["percentage"]
+                improvement = self.data["affordability"]["annual_improvement"]
+                if improvement is not None and improvement != 0:
+                    # For affordability, an improvement means affordability was worse (higher) before
+                    previous = current + improvement if improvement < 0 else current - improvement
+                    self.data["affordability"]["previous_year_percentage"] = previous
+                else:
+                    self.data["affordability"]["previous_year_percentage"] = current
+            
+            # Ensure comparison data is attached
+            self.data["affordability"]["comparison_gs"] = self.GS_REFERENCE_DATA["affordability"]
             self.data["affordability"]["comparison_ron"] = self.RON_REFERENCE_DATA["affordability"]
 
     def fetch_comparison_area_data(self):
