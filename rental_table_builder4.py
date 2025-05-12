@@ -6,6 +6,10 @@ import tempfile
 import base64
 from datetime import datetime
 import re
+import glob
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, Color
 from openpyxl.utils import get_column_letter
@@ -26,7 +30,7 @@ class RentalDataAnalyzer:
         # Geographic areas
         self.GEO_AREAS = ["CED", "GCCSA", "LGA", "SA3", "SA4", "SED", "Suburb"]
         
-        # Data subdirectories
+        # Data subdirectories expected in the root folder
         self.SUB_DIRS = {
             "median_rents": os.path.join("Median rents", "output data"),
             "census_dwelling": os.path.join("Census data", "output data", "dwellings"),
@@ -76,8 +80,132 @@ class RentalDataAnalyzer:
         self.selected_geo_area = None
         self.selected_geo_name = None
         self.data = {}
-        self.uploaded_files = {}
+        self.all_data = {}  # Store all loaded data for interactive dashboard
+        self.files_dict = {}  # Dictionary to store all found files
         self.temp_dir = tempfile.mkdtemp()
+        
+        # Store dataframes for each data type and geography
+        self.dataframes = {
+            "median_rents": {},
+            "census_dwelling": {},
+            "affordability": {},
+            "vacancy_rates": {},
+            "census_demographics": {}
+        }
+
+    def scan_root_folder(self, root_folder):
+        """Scan the root folder for relevant data files"""
+        st.write("Scanning root folder for data files...")
+        
+        # Dictionary to store all found files
+        files_dict = {
+            "median_rents": [],
+            "census_dwelling": [],
+            "census_demographics": [],
+            "affordability": [],
+            "vacancy_rates": []
+        }
+        
+        # Check if the root folder exists
+        if not os.path.exists(root_folder):
+            st.error(f"Root folder {root_folder} does not exist.")
+            return files_dict
+        
+        # For each data type, look for files in the expected subdirectory
+        for data_type, subdir in self.SUB_DIRS.items():
+            full_path = os.path.join(root_folder, subdir)
+            
+            # If the specific subdirectory doesn't exist, try to find files elsewhere
+            if not os.path.exists(full_path):
+                # Look for files with matching patterns throughout the root folder
+                for geo_area, pattern in self.FILE_PATTERNS[data_type].items():
+                    # Search recursively for matching files
+                    for ext in ["*.xlsx", "*.xls", "*.parquet"]:
+                        for file_path in glob.glob(os.path.join(root_folder, "**", f"*{pattern}*{ext}"), recursive=True):
+                            files_dict[data_type].append({
+                                "name": os.path.basename(file_path),
+                                "path": file_path,
+                                "geo_area": geo_area
+                            })
+            else:
+                # The subdirectory exists, so look for files there
+                for geo_area, pattern in self.FILE_PATTERNS[data_type].items():
+                    for ext in ["*.xlsx", "*.xls", "*.parquet"]:
+                        for file_path in glob.glob(os.path.join(full_path, f"*{pattern}*{ext}")):
+                            files_dict[data_type].append({
+                                "name": os.path.basename(file_path),
+                                "path": file_path,
+                                "geo_area": geo_area
+                            })
+        
+        # Store the files dictionary
+        self.files_dict = files_dict
+        
+        # Count found files
+        total_files = sum(len(files) for files in files_dict.values())
+        if total_files > 0:
+            st.success(f"Found {total_files} data files.")
+            
+            # Show details in an expander
+            with st.expander("View found files"):
+                for data_type, files in files_dict.items():
+                    if files:
+                        st.subheader(f"{data_type.replace('_', ' ').title()} Files")
+                        for file in files:
+                            st.write(f"- {file['name']} ({file['geo_area']})")
+        else:
+            st.warning("No data files found in the specified root folder.")
+        
+        return files_dict
+
+    def load_all_data(self):
+        """Load all data files into dataframes"""
+        st.write("Loading all data files...")
+        
+        # Dictionary to store all dataframes
+        dataframes = {
+            "median_rents": {},
+            "census_dwelling": {},
+            "census_demographics": {},
+            "affordability": {},
+            "vacancy_rates": {}
+        }
+        
+        # Process each data type and its files
+        for data_type, files in self.files_dict.items():
+            for file_data in files:
+                try:
+                    file_path = file_data['path']
+                    geo_area = file_data['geo_area']
+                    
+                    # Read the data file
+                    df = self.read_data_file(file_path)
+                    
+                    if df is not None and not df.empty:
+                        # Find the geographic column
+                        geo_col = self.find_geographic_column(df, geo_area.upper() if geo_area != 'suburb' else 'Suburb')
+                        
+                        if geo_col:
+                            # Add a column to identify the geographic area type
+                            df['geo_area_type'] = geo_area
+                            
+                            # Store in the dataframes dictionary under the geo_area key
+                            if geo_area not in dataframes[data_type]:
+                                dataframes[data_type][geo_area] = df
+                            else:
+                                # If we already have a dataframe for this geo_area, append new rows
+                                # This handles multiple files for the same geography if they exist
+                                dataframes[data_type][geo_area] = pd.concat([dataframes[data_type][geo_area], df], ignore_index=True)
+                                
+                            st.success(f"Loaded {file_data['name']} for {geo_area} ({len(df)} rows)")
+                        else:
+                            st.warning(f"Could not identify geographic column in {file_data['name']}")
+                except Exception as e:
+                    st.error(f"Error loading {file_data['name']}: {str(e)}")
+        
+        # Store the dataframes
+        self.dataframes = dataframes
+        return dataframes
 
     def read_data_file(self, file_path):
         """Read data from Excel or Parquet file"""
@@ -162,552 +290,293 @@ class RentalDataAnalyzer:
         
         return None
     
-    def get_geo_names(self, geo_area, uploaded_files):
-        """Get available geographic names for the selected area type from uploaded files"""
+    def get_available_geo_areas(self):
+        """Get available geographic areas based on loaded data"""
+        available_areas = []
+        
+        for data_type, geo_dfs in self.dataframes.items():
+            available_areas.extend(list(geo_dfs.keys()))
+        
+        # Return unique values, sorted
+        return sorted(list(set(available_areas)))
+    
+    def get_geo_names(self, geo_area):
+        """Get available geographic names for the selected area type from loaded data"""
         names = set()
-        found_files = False
         
-        for data_type, file_group in uploaded_files.items():
-            if geo_area.lower() not in self.FILE_PATTERNS[data_type]:
-                continue
+        # Look through each data type for the selected geographic area
+        for data_type, geo_dfs in self.dataframes.items():
+            if geo_area in geo_dfs:
+                df = geo_dfs[geo_area]
                 
-            file_pattern = self.FILE_PATTERNS[data_type][geo_area.lower()]
-            
-            for file_data in file_group:
-                file_name = file_data['name']
-                if file_pattern.lower() in file_name.lower():
-                    found_files = True
-                    file_path = file_data['path']
-                    df = self.read_data_file(file_path)
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, geo_area.upper() if geo_area != 'suburb' else 'Suburb')
+                
+                if geo_col:
+                    # Convert all values to strings and filter out likely non-geographic names
+                    df[geo_col] = df[geo_col].astype(str)
                     
-                    if df is not None and not df.empty:
-                        # Look for the geographic name column
-                        geo_col = self.find_geographic_column(df, geo_area)
+                    # Filter out values that look like dates or numbers
+                    for name in df[geo_col].dropna().unique().tolist():
+                        name_str = str(name)
+                        # Skip if it looks like a date format (2021-01-01, etc.)
+                        if re.match(r'^\d{4}-\d{2}-\d{2}', name_str) or re.match(r'^\d{2}/\d{2}/\d{4}', name_str):
+                            continue
+                        # Skip if it's just a number
+                        if name_str.isdigit():
+                            continue
+                        # Skip very short names (likely codes)
+                        if len(name_str) < 2:
+                            continue
+                        # Skip if it's an LGA/SA code
+                        if re.match(r'^LGA\d+$', name_str) or re.match(r'^SA\d+$', name_str):
+                            continue
                         
-                        if geo_col:
-                            # Convert all values to strings and filter out likely non-geographic names
-                            df[geo_col] = df[geo_col].astype(str)
-                            
-                            # Filter out values that look like dates or numbers
-                            area_names = []
-                            for name in df[geo_col].dropna().unique().tolist():
-                                name_str = str(name)
-                                # Skip if it looks like a date format (2021-01-01, etc.)
-                                if re.match(r'^\d{4}-\d{2}-\d{2}', name_str) or re.match(r'^\d{2}/\d{2}/\d{4}', name_str):
-                                    continue
-                                # Skip if it's just a number
-                                if name_str.isdigit():
-                                    continue
-                                # Skip very short names (likely codes)
-                                if len(name_str) < 2:
-                                    continue
-                                # Skip if it's an LGA/SA code
-                                if re.match(r'^LGA\d+$', name_str) or re.match(r'^SA\d+$', name_str):
-                                    continue
-                                
-                                area_names.append(name_str)
-                            
-                            names.update(area_names)
+                        names.add(name_str)
         
-        if not found_files:
-            st.error(f"No data files found for {geo_area}. Please check your uploaded files.")
-            return []
-        
-        if not names:
-            st.error(f"No geographic names found for {geo_area}. Check that your data files contain the expected columns.")
-            return []
-            
+        # Return sorted list of names
         return sorted(list(names))
     
-    def collect_data(self, uploaded_files):
-        """Collect data from various sources"""
+    def collect_data_for_area(self, geo_area, geo_name):
+        """Collect data for a specific geographic area and name"""
+        self.selected_geo_area = geo_area
+        self.selected_geo_name = geo_name
         self.data = {}
         
-        # Collect data for the selected geographic name
-        st.write(f"Collecting data for {self.selected_geo_name} ({self.selected_geo_area})...")
-        
-        # Collect Census dwelling data
-        with st.spinner('Processing census dwelling data...'):
-            self.collect_census_data(uploaded_files)
-        
-        # Collect Median Rent data
-        with st.spinner('Processing median rent data...'):
-            self.collect_median_rent_data(uploaded_files)
-        
-        # Collect Vacancy Rate data
-        with st.spinner('Processing vacancy rate data...'):
-            self.collect_vacancy_rate_data(uploaded_files)
-        
-        # Collect Affordability data
-        with st.spinner('Processing affordability data...'):
-            self.collect_affordability_data(uploaded_files)
-        
-        # Ensure all required data is available (use defaults if missing)
-        self.ensure_default_data()
+        # Collect data from various sources
+        with st.spinner(f"Collecting data for {geo_name} ({geo_area})..."):
+            # Collect Census dwelling data
+            self.collect_census_data()
+            
+            # Collect Median Rent data
+            self.collect_median_rent_data()
+            
+            # Collect Vacancy Rate data
+            self.collect_vacancy_rate_data()
+            
+            # Collect Affordability data
+            self.collect_affordability_data()
+            
+            # Ensure all required data is available (use defaults if missing)
+            self.ensure_default_data()
         
         st.success("Data collection complete!")
         return self.data
         
-    def collect_census_data(self, uploaded_files):
+    def collect_census_data(self):
         """Collect census dwelling data"""
         try:
-            # Find census dwelling files
-            file_pattern = self.FILE_PATTERNS["census_dwelling"][self.selected_geo_area.lower()]
-            
-            for file_data in uploaded_files.get("census_dwelling", []):
-                file_name = file_data['name']
-                if file_pattern.lower() in file_name.lower():
-                    file_path = file_data['path']
-                    df = self.read_data_file(file_path)
-                    
-                    if df is not None and not df.empty:
-                        # Find the geographic column
-                        geo_col = self.find_geographic_column(df, self.selected_geo_area)
-                        
-                        if geo_col:
-                            # Ensure both values are strings for comparison
-                            df[geo_col] = df[geo_col].astype(str)
-                            selected_name_str = str(self.selected_geo_name)
-                            
-                            # Check for exact match
-                            df_filtered = df[df[geo_col] == selected_name_str]
-                            if df_filtered.empty:
-                                # Try partial match
-                                matches = []
-                                for value in df[geo_col].dropna().unique():
-                                    if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                        matches.append(value)
-                                
-                                if matches:
-                                    best_match = matches[0]  # Use the first match for simplicity
-                                    df_filtered = df[df[geo_col] == best_match]
-                            
-                            if not df_filtered.empty:
-                                # Calculate rental percentage
-                                total_dwellings = None
-                                if "dwellings" in df_filtered.columns:
-                                    total_dwellings = float(df_filtered["dwellings"].iloc[0]) if not pd.isna(df_filtered["dwellings"].iloc[0]) else 0
-                                
-                                total_rented = None
-                                if "dwellings_rented" in df_filtered.columns:
-                                    total_rented = float(df_filtered["dwellings_rented"].iloc[0]) if not pd.isna(df_filtered["dwellings_rented"].iloc[0]) else 0
-                                
-                                # Calculate percentage if we have the raw counts
-                                if total_dwellings is not None and total_rented is not None and total_dwellings > 0:
-                                    rental_pct = (total_rented / total_dwellings) * 100
-                                    rental_count = int(total_rented)
-                                    
-                                    self.data["renters"] = {
-                                        "percentage": round(rental_pct, 1),
-                                        "count": rental_count,
-                                        "period": "2021",
-                                        "source": "ABS Census",
-                                        "comparison_gs": self.GS_REFERENCE_DATA["renters"],
-                                        "comparison_ron": self.RON_REFERENCE_DATA["renters"]
-                                    }
-                                
-                                # Find social housing data
-                                social_housing_sha = 0
-                                social_housing_chp = 0
-                                
-                                # Get SHA data
-                                if "dwellings_rented_sha" in df_filtered.columns:
-                                    sha_value = df_filtered["dwellings_rented_sha"].iloc[0]
-                                    social_housing_sha = float(sha_value) if not pd.isna(sha_value) else 0
-                                
-                                # Get CHP data
-                                if "dwellings_rented_chp" in df_filtered.columns:
-                                    chp_value = df_filtered["dwellings_rented_chp"].iloc[0]
-                                    social_housing_chp = float(chp_value) if not pd.isna(chp_value) else 0
-                                
-                                # Calculate total social housing
-                                total_social = social_housing_sha + social_housing_chp
-                                
-                                # Calculate social housing percentage
-                                if total_dwellings is not None and total_dwellings > 0:
-                                    social_pct = (total_social / total_dwellings) * 100
-                                    social_count = int(total_social)
-                                    
-                                    self.data["social_housing"] = {
-                                        "percentage": round(social_pct, 1),
-                                        "count": social_count,
-                                        "period": "2021",
-                                        "source": "ABS Census",
-                                        "comparison_gs": self.GS_REFERENCE_DATA["social_housing"],
-                                        "comparison_ron": self.RON_REFERENCE_DATA["social_housing"]
-                                    }
-                        break
-        except Exception as e:
-            st.error(f"Error collecting census data: {str(e)}")
-    
-    def collect_median_rent_data(self, uploaded_files):
-        """Collect median rent data"""
-        try:
-            # Find median rent files
-            file_pattern = self.FILE_PATTERNS["median_rents"][self.selected_geo_area.lower()]
-            
-            for file_data in uploaded_files.get("median_rents", []):
-                file_name = file_data['name']
-                if file_pattern.lower() in file_name.lower():
-                    file_path = file_data['path']
-                    df = self.read_data_file(file_path)
-                    
-                    if df is not None and not df.empty:
-                        # Find the geographic column
-                        geo_col = self.find_geographic_column(df, self.selected_geo_area)
-                        
-                        if geo_col:
-                            # Ensure both values are strings for comparison
-                            df[geo_col] = df[geo_col].astype(str)
-                            selected_name_str = str(self.selected_geo_name)
-                            
-                            # Check for exact match
-                            df_filtered = df[df[geo_col] == selected_name_str]
-                            if df_filtered.empty:
-                                # Try partial match
-                                matches = []
-                                for value in df[geo_col].dropna().unique():
-                                    if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                        matches.append(value)
-                                
-                                if matches:
-                                    best_match = matches[0]  # Use the first match for simplicity
-                                    df_filtered = df[df[geo_col] == best_match]
-                            
-                            if not df_filtered.empty:
-                                # If we have a month column, get the most recent month
-                                latest_month = None
-                                if 'month' in df_filtered.columns:
-                                    try:
-                                        df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
-                                        latest_month = df_filtered['month'].max()
-                                        
-                                        # Format latest_month for output
-                                        latest_month_str = latest_month.strftime("%b-%Y")
-                                        
-                                        df_latest = df_filtered[df_filtered['month'] == latest_month]
-                                        
-                                        # Find data from 12 months ago
-                                        one_year_ago = latest_month - pd.DateOffset(months=12)
-                                        df_year_ago = df_filtered[df_filtered['month'] == one_year_ago]
-                                        
-                                        if df_year_ago.empty:
-                                            # Try to find the closest month before one year ago
-                                            prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
-                                            if not prior_months.empty:
-                                                closest_prior_month = prior_months.max()
-                                                df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
-                                    except Exception as e:
-                                        st.warning(f"Error processing dates: {str(e)}")
-                                        df_latest = df_filtered
-                                        df_year_ago = pd.DataFrame()  # Empty DataFrame if we couldn't process dates
-                                else:
-                                    df_latest = df_filtered
-                                    df_year_ago = pd.DataFrame()  # Empty DataFrame if no month column
-                                    
-                                # If we have property_type, get the "All Dwellings" type
-                                if 'property_type' in df_latest.columns:
-                                    if 'All Dwellings' in df_latest['property_type'].values:
-                                        df_latest = df_latest[df_latest['property_type'] == 'All Dwellings']
-                                        # Also filter year ago data if we have it
-                                        if not df_year_ago.empty and 'property_type' in df_year_ago.columns:
-                                            if 'All Dwellings' in df_year_ago['property_type'].values:
-                                                df_year_ago = df_year_ago[df_year_ago['property_type'] == 'All Dwellings']
-                                
-                                # Find columns for median rent data - prefer 3-month median
-                                rent_col = None
-                                for col_prefix in ['median_rent_3mo', 'median_rent_1mo', 'median_rent', 'rent_median']:
-                                    for col in df_latest.columns:
-                                        if col.startswith(col_prefix) and not any(x in col for x in ['growth', 'increase', 'change']):
-                                            rent_col = col
-                                            break
-                                    if rent_col:
-                                        break
-                                        
-                                # Find annual growth column
-                                growth_col = None
-                                for col_suffix in ['annual_growth', 'annual_increase', 'yearly_growth', 'yearly_increase']:
-                                    for col in df_latest.columns:
-                                        if col.endswith(col_suffix):
-                                            growth_col = col
-                                            break
-                                    if growth_col:
-                                        break
-                                
-                                # Extract data
-                                if rent_col:
-                                    # Get the median rent value
-                                    if len(df_latest) > 0:
-                                        rent_value = float(df_latest[rent_col].iloc[0]) if not pd.isna(df_latest[rent_col].iloc[0]) else 0
-                                        
-                                        # Get annual increase - prefer to calculate from year ago data
-                                        annual_increase = None
-                                        prev_year_rent = None
-                                        
-                                        # Method 1: Calculate from year ago data (most accurate)
-                                        if not df_year_ago.empty and rent_col in df_year_ago.columns:
-                                            prev_year_rent = float(df_year_ago[rent_col].iloc[0]) if not pd.isna(df_year_ago[rent_col].iloc[0]) else 0
-                                            
-                                            if prev_year_rent > 0:
-                                                annual_increase = ((rent_value - prev_year_rent) / prev_year_rent) * 100
-                                        
-                                        # Method 2: Use provided annual increase column
-                                        if annual_increase is None and growth_col and len(df_latest) > 0:
-                                            annual_increase_value = df_latest[growth_col].iloc[0]
-                                            if not pd.isna(annual_increase_value):
-                                                annual_increase = float(annual_increase_value) * 100 if float(annual_increase_value) < 1 else float(annual_increase_value)
-                                                
-                                                # If we have current rent and annual increase but not previous rent, calculate it
-                                                if prev_year_rent is None:
-                                                    prev_year_rent = rent_value / (1 + (annual_increase / 100))
-                                        
-                                        self.data["median_rent"] = {
-                                            "value": int(round(rent_value, 0)),
-                                            "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
-                                            "source": "NSW Fair Trading Corelogic Data",
-                                            "annual_increase": round(annual_increase, 1) if annual_increase is not None else 0,
-                                            "previous_year_rent": int(round(prev_year_rent, 0)) if prev_year_rent is not None else None,
-                                            "comparison_gs": self.GS_REFERENCE_DATA["median_rent"],
-                                            "comparison_ron": self.RON_REFERENCE_DATA["median_rent"]
-                                        }
-                        break
-        except Exception as e:
-            st.error(f"Error collecting median rent data: {str(e)}")
-    
-    def collect_vacancy_rate_data(self, uploaded_files):
-        """Collect vacancy rate data"""
-        try:
-            # Find vacancy rate files
-            file_pattern = self.FILE_PATTERNS["vacancy_rates"][self.selected_geo_area.lower()]
-            found_files = False
-            
-            for file_data in uploaded_files.get("vacancy_rates", []):
-                file_name = file_data['name']
-                if file_pattern.lower() in file_name.lower():
-                    found_files = True
-                    file_path = file_data['path']
-                    df = self.read_data_file(file_path)
-                    
-                    if df is not None and not df.empty:
-                        # Find the geographic column
-                        geo_col = self.find_geographic_column(df, self.selected_geo_area)
-                        
-                        if geo_col:
-                            # Ensure both values are strings for comparison
-                            df[geo_col] = df[geo_col].astype(str)
-                            selected_name_str = str(self.selected_geo_name)
-                            
-                            # Check for exact match
-                            df_filtered = df[df[geo_col] == selected_name_str]
-                            if df_filtered.empty:
-                                # Try partial match
-                                matches = []
-                                for value in df[geo_col].dropna().unique():
-                                    if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                        matches.append(value)
-                                
-                                if matches:
-                                    best_match = matches[0]  # Use the first match for simplicity
-                                    df_filtered = df[df[geo_col] == best_match]
-                            
-                            if not df_filtered.empty:
-                                # If we have a month column, get the most recent month
-                                latest_month = None
-                                if 'month' in df_filtered.columns:
-                                    df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
-                                    latest_month = df_filtered['month'].max()
-                                    df_latest = df_filtered[df_filtered['month'] == latest_month]
-                                else:
-                                    df_latest = df_filtered
-                                
-                                # Find vacancy rate column
-                                rate_col = None
-                                if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
-                                    rate_col = 'rental_vacancy_rate_3m_smoothed'
-                                else:
-                                    # Fallback to other columns
-                                    for col_name in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
-                                        if col_name in df_latest.columns:
-                                            rate_col = col_name
-                                            break
-                                
-                                if not rate_col:
-                                    # If still no rate column found, try more generic search
-                                    for col in df_latest.columns:
-                                        if 'vacancy' in col.lower() and ('rate' in col.lower() or 'pct' in col.lower() or 'percent' in col.lower()):
-                                            rate_col = col
-                                            break
-                                
-                                # Get previous year rate
-                                previous_year_rate = None
-                                if 'month' in df_filtered.columns and rate_col:
-                                    try:
-                                        # Get current month's value
-                                        current_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
-                                        
-                                        # Try to find data from a year ago
-                                        one_year_ago = latest_month - pd.DateOffset(months=12)
-                                        year_ago_data = df_filtered[df_filtered['month'] == one_year_ago]
-                                        
-                                        if not year_ago_data.empty and rate_col in year_ago_data.columns:
-                                            year_ago_value = float(year_ago_data[rate_col].iloc[0]) if not pd.isna(year_ago_data[rate_col].iloc[0]) else 0
-                                            previous_year_rate = year_ago_value
-                                        else:
-                                            # If exact month not found, try to find closest month before
-                                            prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
-                                            if not prior_months.empty:
-                                                closest_prior = prior_months.max()
-                                                closest_data = df_filtered[df_filtered['month'] == closest_prior]
-                                                if not closest_data.empty and rate_col in closest_data.columns:
-                                                    prior_value = float(closest_data[rate_col].iloc[0]) if not pd.isna(closest_data[rate_col].iloc[0]) else 0
-                                                    previous_year_rate = prior_value
-                                    except Exception as e:
-                                        st.warning(f"Error getting previous year vacancy rate: {str(e)}")
-                                
-                                # Extract data
-                                if rate_col and len(df_latest) > 0:
-                                    if rate_col in df_latest.columns:
-                                        rate_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
-                                        
-                                        self.data["vacancy_rates"] = {
-                                            "value": rate_value,
-                                            "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
-                                            "source": "NSW Fair Trading Prop Track Data",
-                                            "previous_year_rate": previous_year_rate,
-                                            "comparison_gs": self.GS_REFERENCE_DATA["vacancy_rates"],
-                                            "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"]
-                                        }
-                    break
-        
-            if not found_files:
-                st.warning(f"No vacancy rate files found matching pattern: {file_pattern}")
+            # Check if we have census dwelling data for the selected geo area
+            if self.selected_geo_area in self.dataframes["census_dwelling"]:
+                df = self.dataframes["census_dwelling"][self.selected_geo_area]
                 
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                
+                if geo_col:
+                    # Ensure both values are strings for comparison
+                    df[geo_col] = df[geo_col].astype(str)
+                    selected_name_str = str(self.selected_geo_name)
+                    
+                    # Check for exact match
+                    df_filtered = df[df[geo_col] == selected_name_str]
+                    if df_filtered.empty:
+                        # Try partial match
+                        matches = []
+                        for value in df[geo_col].dropna().unique():
+                            if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
+                                matches.append(value)
+                        
+                        if matches:
+                            best_match = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # If we have a month column, get the most recent month
+                        latest_month = None
+                        if 'month' in df_filtered.columns:
+                            df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
+                            latest_month = df_filtered['month'].max()
+                            df_latest = df_filtered[df_filtered['month'] == latest_month]
+                        else:
+                            df_latest = df_filtered
+                        
+                        # Find vacancy rate column
+                        rate_col = None
+                        if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
+                            rate_col = 'rental_vacancy_rate_3m_smoothed'
+                        else:
+                            # Fallback to other columns
+                            for col_name in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
+                                if col_name in df_latest.columns:
+                                    rate_col = col_name
+                                    break
+                        
+                        if not rate_col:
+                            # If still no rate column found, try more generic search
+                            for col in df_latest.columns:
+                                if 'vacancy' in col.lower() and ('rate' in col.lower() or 'pct' in col.lower() or 'percent' in col.lower()):
+                                    rate_col = col
+                                    break
+                        
+                        # Get previous year rate
+                        previous_year_rate = None
+                        if 'month' in df_filtered.columns and rate_col:
+                            try:
+                                # Get current month's value
+                                current_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
+                                
+                                # Try to find data from a year ago
+                                one_year_ago = latest_month - pd.DateOffset(months=12)
+                                year_ago_data = df_filtered[df_filtered['month'] == one_year_ago]
+                                
+                                if not year_ago_data.empty and rate_col in year_ago_data.columns:
+                                    year_ago_value = float(year_ago_data[rate_col].iloc[0]) if not pd.isna(year_ago_data[rate_col].iloc[0]) else 0
+                                    previous_year_rate = year_ago_value
+                                else:
+                                    # If exact month not found, try to find closest month before
+                                    prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
+                                    if not prior_months.empty:
+                                        closest_prior = prior_months.max()
+                                        closest_data = df_filtered[df_filtered['month'] == closest_prior]
+                                        if not closest_data.empty and rate_col in closest_data.columns:
+                                            prior_value = float(closest_data[rate_col].iloc[0]) if not pd.isna(closest_data[rate_col].iloc[0]) else 0
+                                            previous_year_rate = prior_value
+                            except Exception as e:
+                                st.warning(f"Error getting previous year vacancy rate: {str(e)}")
+                        
+                        # Extract data
+                        if rate_col and len(df_latest) > 0:
+                            if rate_col in df_latest.columns:
+                                rate_value = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
+                                
+                                self.data["vacancy_rates"] = {
+                                    "value": rate_value,
+                                    "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
+                                    "source": "NSW Fair Trading Prop Track Data",
+                                    "previous_year_rate": previous_year_rate,
+                                    "comparison_gs": self.GS_REFERENCE_DATA["vacancy_rates"],
+                                    "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"],
+                                    "time_series": self.extract_time_series_data(df_filtered, rate_col)
+                                }
         except Exception as e:
             st.error(f"Error collecting vacancy rate data: {str(e)}")
-            import traceback
-            st.error(traceback.format_exc())
     
-    def collect_affordability_data(self, uploaded_files):
+    def collect_affordability_data(self):
         """Collect affordability data"""
         try:
-            # Find affordability files
-            file_pattern = self.FILE_PATTERNS["affordability"][self.selected_geo_area.lower()]
-            
-            for file_data in uploaded_files.get("affordability", []):
-                file_name = file_data['name']
-                if file_pattern.lower() in file_name.lower():
-                    file_path = file_data['path']
-                    df = self.read_data_file(file_path)
+            # Check if we have affordability data for the selected geo area
+            if self.selected_geo_area in self.dataframes["affordability"]:
+                df = self.dataframes["affordability"][self.selected_geo_area]
+                
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                
+                if geo_col:
+                    # Ensure both values are strings for comparison
+                    df[geo_col] = df[geo_col].astype(str)
+                    selected_name_str = str(self.selected_geo_name)
                     
-                    if df is not None and not df.empty:
-                        # Find the geographic column
-                        geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                    # Check for exact match
+                    df_filtered = df[df[geo_col] == selected_name_str]
+                    if df_filtered.empty:
+                        # Try partial match
+                        matches = []
+                        for value in df[geo_col].dropna().unique():
+                            if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
+                                matches.append(value)
                         
-                        if geo_col:
-                            # Ensure both values are strings for comparison
-                            df[geo_col] = df[geo_col].astype(str)
-                            selected_name_str = str(self.selected_geo_name)
+                        if matches:
+                            best_match = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # If we have a month column, get the most recent month
+                        latest_month = None
+                        previous_year_month = None
+                        previous_year_pct = None
+                        
+                        if 'month' in df_filtered.columns:
+                            df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
+                            latest_month = df_filtered['month'].max()
+                            df_latest = df_filtered[df_filtered['month'] == latest_month]
                             
-                            # Check for exact match
-                            df_filtered = df[df[geo_col] == selected_name_str]
-                            if df_filtered.empty:
-                                # Try partial match
-                                matches = []
-                                for value in df[geo_col].dropna().unique():
-                                    if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                        matches.append(value)
-                                
-                                if matches:
-                                    best_match = matches[0]  # Use the first match for simplicity
-                                    df_filtered = df[df[geo_col] == best_match]
+                            # Try to find data from a year ago
+                            one_year_ago = latest_month - pd.DateOffset(months=12)
                             
-                            if not df_filtered.empty:
-                                # If we have a month column, get the most recent month
-                                latest_month = None
-                                previous_year_month = None
-                                previous_year_pct = None
-                                
-                                if 'month' in df_filtered.columns:
-                                    df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
-                                    latest_month = df_filtered['month'].max()
-                                    df_latest = df_filtered[df_filtered['month'] == latest_month]
-                                    
-                                    # Try to find data from a year ago
-                                    one_year_ago = latest_month - pd.DateOffset(months=12)
-                                    
-                                    # Try exact match for one year ago
-                                    df_year_ago = df_filtered[df_filtered['month'] == one_year_ago]
-                                    
-                                    # If not found, try to find the closest month before that date
-                                    if df_year_ago.empty:
-                                        prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
-                                        if not prior_months.empty:
-                                            closest_prior_month = prior_months.max()
-                                            df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
-                                            previous_year_month = closest_prior_month
-                                    else:
-                                        previous_year_month = one_year_ago
-                                else:
-                                    df_latest = df_filtered
-                                    df_year_ago = pd.DataFrame()  # Empty DataFrame if no month column
-                                    
-                                # Find affordability column - look for keywords
-                                pct_col = None
-                                
-                                # First priority: direct affordability columns
-                                affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
-                                if affordability_columns:
-                                    # Prefer 3-month affordability for stability
-                                    if 'rental_affordability_3mo' in affordability_columns:
-                                        pct_col = 'rental_affordability_3mo'
-                                    elif 'rental_affordability_1mo' in affordability_columns:
-                                        pct_col = 'rental_affordability_1mo'
-                                    else:
-                                        pct_col = affordability_columns[0]  # Take the first one if no preferred column
-                                
-                                # If no direct affordability column, try to find rent-to-income ratio
-                                if not pct_col:
-                                    for keywords in [['rent', 'income'], ['rental', 'affordability'], ['income', 'rent']]:
-                                        for col in df_latest.columns:
-                                            if all(keyword.lower() in col.lower() for keyword in keywords):
-                                                pct_col = col
-                                                break
-                                        if pct_col:
-                                            break
-                                
-                                # Extract current affordability value
-                                if pct_col and len(df_latest) > 0:
-                                    pct_value = float(df_latest[pct_col].iloc[0]) if not pd.isna(df_latest[pct_col].iloc[0]) else 0
-                                    
-                                    # Ensure the value is properly formatted as a percentage
-                                    if pct_value > 0 and pct_value < 1:
-                                        pct_value = pct_value * 100  # Convert decimal to percentage
-                                    
-                                    # Get previous year value if available from year-ago data
-                                    if not df_year_ago.empty and pct_col in df_year_ago.columns:
-                                        prev_value = float(df_year_ago[pct_col].iloc[0]) if not pd.isna(df_year_ago[pct_col].iloc[0]) else None
-                                        if prev_value is not None:
-                                            # Ensure previous value is also formatted as percentage
-                                            if prev_value > 0 and prev_value < 1:
-                                                prev_value = prev_value * 100
-                                            previous_year_pct = prev_value
-                                    
-                                    # Calculate improvement (for comparison purposes)
-                                    annual_improvement = None
-                                    if previous_year_pct is not None and previous_year_pct > 0:
-                                        # For affordability, a decrease is an improvement
-                                        annual_improvement = pct_value - previous_year_pct
-                                    
-                                    self.data["affordability"] = {
-                                        "percentage": round(pct_value, 1),
-                                        "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
-                                        "source": "NSW Fair Trading Prop Track Data",
-                                        "previous_year_percentage": round(previous_year_pct, 1) if previous_year_pct is not None else None,
-                                        "annual_improvement": round(annual_improvement, 2) if annual_improvement is not None else 0,
-                                        "comparison_gs": self.GS_REFERENCE_DATA["affordability"],
-                                        "comparison_ron": self.RON_REFERENCE_DATA["affordability"]
-                                    }
-                        break
+                            # Try exact match for one year ago
+                            df_year_ago = df_filtered[df_filtered['month'] == one_year_ago]
+                            
+                            # If not found, try to find the closest month before that date
+                            if df_year_ago.empty:
+                                prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
+                                if not prior_months.empty:
+                                    closest_prior_month = prior_months.max()
+                                    df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
+                                    previous_year_month = closest_prior_month
+                            else:
+                                previous_year_month = one_year_ago
+                        else:
+                            df_latest = df_filtered
+                            df_year_ago = pd.DataFrame()  # Empty DataFrame if no month column
+                            
+                        # Find affordability column - look for keywords
+                        pct_col = None
+                        
+                        # First priority: direct affordability columns
+                        affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
+                        if affordability_columns:
+                            # Prefer 3-month affordability for stability
+                            if 'rental_affordability_3mo' in affordability_columns:
+                                pct_col = 'rental_affordability_3mo'
+                            elif 'rental_affordability_1mo' in affordability_columns:
+                                pct_col = 'rental_affordability_1mo'
+                            else:
+                                pct_col = affordability_columns[0]  # Take the first one if no preferred column
+                        
+                        # If no direct affordability column, try to find rent-to-income ratio
+                        if not pct_col:
+                            for keywords in [['rent', 'income'], ['rental', 'affordability'], ['income', 'rent']]:
+                                for col in df_latest.columns:
+                                    if all(keyword.lower() in col.lower() for keyword in keywords):
+                                        pct_col = col
+                                        break
+                                if pct_col:
+                                    break
+                        
+                        # Extract current affordability value
+                        if pct_col and len(df_latest) > 0:
+                            pct_value = float(df_latest[pct_col].iloc[0]) if not pd.isna(df_latest[pct_col].iloc[0]) else 0
+                            
+                            # Ensure the value is properly formatted as a percentage
+                            if pct_value > 0 and pct_value < 1:
+                                pct_value = pct_value * 100  # Convert decimal to percentage
+                            
+                            # Get previous year value if available from year-ago data
+                            if not df_year_ago.empty and pct_col in df_year_ago.columns:
+                                prev_value = float(df_year_ago[pct_col].iloc[0]) if not pd.isna(df_year_ago[pct_col].iloc[0]) else None
+                                if prev_value is not None:
+                                    # Ensure previous value is also formatted as percentage
+                                    if prev_value > 0 and prev_value < 1:
+                                        prev_value = prev_value * 100
+                                    previous_year_pct = prev_value
+                            
+                            # Calculate improvement (for comparison purposes)
+                            annual_improvement = None
+                            if previous_year_pct is not None and previous_year_pct > 0:
+                                # For affordability, a decrease is an improvement
+                                annual_improvement = pct_value - previous_year_pct
+                            
+                            self.data["affordability"] = {
+                                "percentage": round(pct_value, 1),
+                                "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
+                                "source": "NSW Fair Trading Prop Track Data",
+                                "previous_year_percentage": round(previous_year_pct, 1) if previous_year_pct is not None else None,
+                                "annual_improvement": round(annual_improvement, 2) if annual_improvement is not None else 0,
+                                "comparison_gs": self.GS_REFERENCE_DATA["affordability"],
+                                "comparison_ron": self.RON_REFERENCE_DATA["affordability"],
+                                "time_series": self.extract_time_series_data(df_filtered, pct_col)
+                            }
         except Exception as e:
             st.error(f"Error collecting affordability data: {str(e)}")
     
@@ -750,7 +619,8 @@ class RentalDataAnalyzer:
                 "annual_increase": 10.2,
                 "previous_year_rent": 540,
                 "comparison_gs": self.GS_REFERENCE_DATA["median_rent"],
-                "comparison_ron": self.RON_REFERENCE_DATA["median_rent"]
+                "comparison_ron": self.RON_REFERENCE_DATA["median_rent"],
+                "time_series": None
             }
         else:
             # Ensure comparison data is attached
@@ -765,7 +635,8 @@ class RentalDataAnalyzer:
                 "source": "NSW Fair Trading Prop Track Data",
                 "previous_year_rate": 1.0,  # Previous year also as decimal
                 "comparison_gs": self.GS_REFERENCE_DATA["vacancy_rates"],
-                "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"]
+                "comparison_ron": self.RON_REFERENCE_DATA["vacancy_rates"],
+                "time_series": None
             }
         else:
             # Ensure comparison data is attached
@@ -779,7 +650,8 @@ class RentalDataAnalyzer:
                 "source": "NSW Fair Trading Prop Track Data",
                 "previous_year_percentage": 43.6,  # Store previous year value instead of improvement
                 "comparison_gs": self.GS_REFERENCE_DATA["affordability"],
-                "comparison_ron": self.RON_REFERENCE_DATA["affordability"]
+                "comparison_ron": self.RON_REFERENCE_DATA["affordability"],
+                "time_series": None
             }
         else:
             # Ensure we have previous year percentage
@@ -798,9 +670,10 @@ class RentalDataAnalyzer:
             self.data["affordability"]["comparison_gs"] = self.GS_REFERENCE_DATA["affordability"]
             self.data["affordability"]["comparison_ron"] = self.RON_REFERENCE_DATA["affordability"]
 
-    def fetch_comparison_area_data(self, uploaded_files, area_names=["Greater Sydney", "Rest of NSW"]):
+    def fetch_comparison_area_data(self):
         """Fetch actual data for comparison areas (Greater Sydney and Rest of NSW)"""
         comparison_data = {}
+        area_names = ["Greater Sydney", "Rest of NSW"]
         
         try:
             for area_name in area_names:
@@ -813,135 +686,130 @@ class RentalDataAnalyzer:
                     "affordability_previous": None
                 }
                 
-                # For each data category, fetch the actual data for the area
+                # For each data type, fetch the actual data for the area
                 for data_type in ["census_dwelling", "median_rents", "vacancy_rates", "affordability"]:
-                    for file_data in uploaded_files.get(data_type, []):
-                        file_name = file_data['name']
-                        if "gccsa" in file_name.lower():  # GCCSA level has both Greater Sydney and Rest of NSW
-                            file_path = file_data['path']
-                            df = self.read_data_file(file_path)
+                    if "gccsa" in self.dataframes[data_type]:  # GCCSA level has both Greater Sydney and Rest of NSW
+                        df = self.dataframes[data_type]["gccsa"]
+                        
+                        if df is not None and not df.empty:
+                            geo_col = self.find_geographic_column(df, "GCCSA")
                             
-                            if df is not None and not df.empty:
-                                geo_col = self.find_geographic_column(df, "GCCSA")
+                            if geo_col:
+                                # Find rows for the current area
+                                df_area = df[df[geo_col].str.contains(area_name, case=False, na=False)]
                                 
-                                if geo_col:
-                                    # Find rows for the current area
-                                    df_area = df[df[geo_col].str.contains(area_name, case=False, na=False)]
-                                    
-                                    if not df_area.empty:
-                                        # Process according to data type
-                                        if data_type == "census_dwelling":
-                                            # Calculate renter percentage
-                                            if "dwellings" in df_area.columns and "dwellings_rented" in df_area.columns:
-                                                dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
-                                                rented = float(df_area["dwellings_rented"].iloc[0]) if not pd.isna(df_area["dwellings_rented"].iloc[0]) else 0
-                                                
-                                                if dwellings > 0:
-                                                    comparison_data[area_name]["renters"] = round((rented / dwellings) * 100, 1)
+                                if not df_area.empty:
+                                    # Process according to data type
+                                    if data_type == "census_dwelling":
+                                        # Calculate renter percentage
+                                        if "dwellings" in df_area.columns and "dwellings_rented" in df_area.columns:
+                                            dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
+                                            rented = float(df_area["dwellings_rented"].iloc[0]) if not pd.isna(df_area["dwellings_rented"].iloc[0]) else 0
                                             
-                                            # Calculate social housing percentage
-                                            if "dwellings" in df_area.columns and "dwellings_rented_sha" in df_area.columns and "dwellings_rented_chp" in df_area.columns:
-                                                dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
-                                                sha = float(df_area["dwellings_rented_sha"].iloc[0]) if not pd.isna(df_area["dwellings_rented_sha"].iloc[0]) else 0
-                                                chp = float(df_area["dwellings_rented_chp"].iloc[0]) if not pd.isna(df_area["dwellings_rented_chp"].iloc[0]) else 0
-                                                
-                                                if dwellings > 0:
-                                                    comparison_data[area_name]["social_housing"] = round(((sha + chp) / dwellings) * 100, 1)
+                                            if dwellings > 0:
+                                                comparison_data[area_name]["renters"] = round((rented / dwellings) * 100, 1)
                                         
-                                        elif data_type == "median_rents":
-                                            # Get latest month data
-                                            if 'month' in df_area.columns:
-                                                df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
-                                                latest_month = df_area['month'].max()
-                                                df_latest = df_area[df_area['month'] == latest_month]
-                                                
-                                                if 'property_type' in df_latest.columns and 'All Dwellings' in df_latest['property_type'].values:
-                                                    df_latest = df_latest[df_latest['property_type'] == 'All Dwellings']
-                                                
-                                                # Find annual growth column
-                                                growth_col = None
-                                                for suffix in ['annual_growth', 'annual_increase', 'yearly_growth', 'yearly_increase']:
-                                                    for col in df_latest.columns:
-                                                        if col.endswith(suffix):
-                                                            growth_col = col
-                                                            break
-                                                    if growth_col:
+                                        # Calculate social housing percentage
+                                        if "dwellings" in df_area.columns and "dwellings_rented_sha" in df_area.columns and "dwellings_rented_chp" in df_area.columns:
+                                            dwellings = float(df_area["dwellings"].iloc[0]) if not pd.isna(df_area["dwellings"].iloc[0]) else 0
+                                            sha = float(df_area["dwellings_rented_sha"].iloc[0]) if not pd.isna(df_area["dwellings_rented_sha"].iloc[0]) else 0
+                                            chp = float(df_area["dwellings_rented_chp"].iloc[0]) if not pd.isna(df_area["dwellings_rented_chp"].iloc[0]) else 0
+                                            
+                                            if dwellings > 0:
+                                                comparison_data[area_name]["social_housing"] = round(((sha + chp) / dwellings) * 100, 1)
+                                    
+                                    elif data_type == "median_rents":
+                                        # Get latest month data
+                                        if 'month' in df_area.columns:
+                                            df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                            latest_month = df_area['month'].max()
+                                            df_latest = df_area[df_area['month'] == latest_month]
+                                            
+                                            if 'property_type' in df_latest.columns and 'All Dwellings' in df_latest['property_type'].values:
+                                                df_latest = df_latest[df_latest['property_type'] == 'All Dwellings']
+                                            
+                                            # Find annual growth column
+                                            growth_col = None
+                                            for suffix in ['annual_growth', 'annual_increase', 'yearly_growth', 'yearly_increase']:
+                                                for col in df_latest.columns:
+                                                    if col.endswith(suffix):
+                                                        growth_col = col
                                                         break
+                                                if growth_col:
+                                                    break
+                                            
+                                            if growth_col and len(df_latest) > 0:
+                                                growth_value = df_latest[growth_col].iloc[0]
+                                                if not pd.isna(growth_value):
+                                                    annual_increase = float(growth_value) * 100 if float(growth_value) < 1 else float(growth_value)
+                                                    comparison_data[area_name]["median_rent"] = round(annual_increase, 1)
+                                    
+                                    elif data_type == "vacancy_rates":
+                                        # Get latest month and year-ago data
+                                        if 'month' in df_area.columns:
+                                            df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                            latest_month = df_area['month'].max()
+                                            df_latest = df_area[df_area['month'] == latest_month]
+                                            
+                                            # Find vacancy rate column
+                                            rate_col = None
+                                            if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
+                                                rate_col = 'rental_vacancy_rate_3m_smoothed'
+                                            else:
+                                                for col in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
+                                                    if col in df_latest.columns:
+                                                        rate_col = col
+                                                        break
+                                            
+                                            if rate_col and len(df_latest) > 0:
+                                                current_rate = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
                                                 
-                                                if growth_col and len(df_latest) > 0:
-                                                    growth_value = df_latest[growth_col].iloc[0]
-                                                    if not pd.isna(growth_value):
-                                                        annual_increase = float(growth_value) * 100 if float(growth_value) < 1 else float(growth_value)
-                                                        comparison_data[area_name]["median_rent"] = round(annual_increase, 1)
-                                        
-                                        elif data_type == "vacancy_rates":
-                                            # Get latest month and year-ago data
-                                            if 'month' in df_area.columns:
-                                                df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
-                                                latest_month = df_area['month'].max()
-                                                df_latest = df_area[df_area['month'] == latest_month]
+                                                # Get year-ago data to calculate change
+                                                one_year_ago = latest_month - pd.DateOffset(months=12)
+                                                df_year_ago = df_area[df_area['month'] == one_year_ago]
                                                 
-                                                # Find vacancy rate column
-                                                rate_col = None
-                                                if 'rental_vacancy_rate_3m_smoothed' in df_latest.columns:
-                                                    rate_col = 'rental_vacancy_rate_3m_smoothed'
+                                                if not df_year_ago.empty and rate_col in df_year_ago.columns:
+                                                    prev_rate = float(df_year_ago[rate_col].iloc[0]) if not pd.isna(df_year_ago[rate_col].iloc[0]) else 0
+                                                    change = current_rate - prev_rate
+                                                    comparison_data[area_name]["vacancy_rates"] = round(change, 2)
+                                    
+                                    elif data_type == "affordability":
+                                        # Get latest month data
+                                        if 'month' in df_area.columns:
+                                            df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
+                                            latest_month = df_area['month'].max()
+                                            df_latest = df_area[df_area['month'] == latest_month]
+                                            
+                                            # Find affordability column
+                                            aff_col = None
+                                            affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
+                                            if affordability_columns:
+                                                if 'rental_affordability_3mo' in affordability_columns:
+                                                    aff_col = 'rental_affordability_3mo'
+                                                elif 'rental_affordability_1mo' in affordability_columns:
+                                                    aff_col = 'rental_affordability_1mo'
                                                 else:
-                                                    for col in ['rental_vacancy_rate', 'vacancy_rate', 'rate']:
-                                                        if col in df_latest.columns:
-                                                            rate_col = col
-                                                            break
+                                                    aff_col = affordability_columns[0]
+                                            
+                                            if aff_col and len(df_latest) > 0:
+                                                aff_value = float(df_latest[aff_col].iloc[0]) if not pd.isna(df_latest[aff_col].iloc[0]) else 0
+                                                if aff_value > 0 and aff_value < 1:
+                                                    aff_value = aff_value * 100
                                                 
-                                                if rate_col and len(df_latest) > 0:
-                                                    current_rate = float(df_latest[rate_col].iloc[0]) if not pd.isna(df_latest[rate_col].iloc[0]) else 0
-                                                    
-                                                    # Get year-ago data to calculate change
-                                                    one_year_ago = latest_month - pd.DateOffset(months=12)
-                                                    df_year_ago = df_area[df_area['month'] == one_year_ago]
-                                                    
-                                                    if not df_year_ago.empty and rate_col in df_year_ago.columns:
-                                                        prev_rate = float(df_year_ago[rate_col].iloc[0]) if not pd.isna(df_year_ago[rate_col].iloc[0]) else 0
-                                                        change = current_rate - prev_rate
-                                                        comparison_data[area_name]["vacancy_rates"] = round(change, 2)
-                                        
-                                        elif data_type == "affordability":
-                                            # Get latest month data
-                                            if 'month' in df_area.columns:
-                                                df_area['month'] = pd.to_datetime(df_area['month'], errors='coerce')
-                                                latest_month = df_area['month'].max()
-                                                df_latest = df_area[df_area['month'] == latest_month]
+                                                comparison_data[area_name]["affordability"] = round(aff_value, 1)
                                                 
-                                                # Find affordability column
-                                                aff_col = None
-                                                affordability_columns = [col for col in df_latest.columns if 'affordability' in col.lower()]
-                                                if affordability_columns:
-                                                    if 'rental_affordability_3mo' in affordability_columns:
-                                                        aff_col = 'rental_affordability_3mo'
-                                                    elif 'rental_affordability_1mo' in affordability_columns:
-                                                        aff_col = 'rental_affordability_1mo'
-                                                    else:
-                                                        aff_col = affordability_columns[0]
+                                                # Get year-ago data
+                                                one_year_ago = latest_month - pd.DateOffset(months=12)
+                                                df_year_ago = df_area[df_area['month'] == one_year_ago]
                                                 
-                                                if aff_col and len(df_latest) > 0:
-                                                    aff_value = float(df_latest[aff_col].iloc[0]) if not pd.isna(df_latest[aff_col].iloc[0]) else 0
-                                                    if aff_value > 0 and aff_value < 1:
-                                                        aff_value = aff_value * 100
+                                                if not df_year_ago.empty and aff_col in df_year_ago.columns:
+                                                    prev_aff = float(df_year_ago[aff_col].iloc[0]) if not pd.isna(df_year_ago[aff_col].iloc[0]) else 0
+                                                    if prev_aff > 0 and prev_aff < 1:
+                                                        prev_aff = prev_aff * 100
                                                     
-                                                    comparison_data[area_name]["affordability"] = round(aff_value, 1)
-                                                    
-                                                    # Get year-ago data
-                                                    one_year_ago = latest_month - pd.DateOffset(months=12)
-                                                    df_year_ago = df_area[df_area['month'] == one_year_ago]
-                                                    
-                                                    if not df_year_ago.empty and aff_col in df_year_ago.columns:
-                                                        prev_aff = float(df_year_ago[aff_col].iloc[0]) if not pd.isna(df_year_ago[aff_col].iloc[0]) else 0
-                                                        if prev_aff > 0 and prev_aff < 1:
-                                                            prev_aff = prev_aff * 100
-                                                        
-                                                        comparison_data[area_name]["affordability_previous"] = round(prev_aff, 1)
+                                                    comparison_data[area_name]["affordability_previous"] = round(prev_aff, 1)
         except Exception as e:
             st.error(f"Error in fetch_comparison_area_data: {str(e)}")
-            import traceback
-            st.error(traceback.format_exc())
         
         # Store the fetched comparison data
         self.comparison_data = comparison_data
@@ -1403,286 +1271,961 @@ class RentalDataAnalyzer:
         excel_buffer.seek(0)
         
         return excel_buffer
+    
+    def create_dashboard_charts(self):
+        """Create interactive charts for the dashboard"""
+        charts = {}
+        
+        # 1. Rent Trend Chart
+        if "median_rent" in self.data and "time_series" in self.data["median_rent"] and self.data["median_rent"]["time_series"]:
+            rent_data = self.data["median_rent"]["time_series"]
+            dates = [item['date'] for item in rent_data]
+            values = [item['value'] for item in rent_data]
+            
+            fig = px.line(
+                x=dates, 
+                y=values, 
+                title=f"Median Weekly Rent Trend for {self.selected_geo_name}",
+                labels={"x": "Date", "y": "Median Weekly Rent ($)"}
+            )
+            fig.update_layout(
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+                hovermode="x unified"
+            )
+            charts["rent_trend"] = fig
+        
+        # 2. Vacancy Rate Trend Chart
+        if "vacancy_rates" in self.data and "time_series" in self.data["vacancy_rates"] and self.data["vacancy_rates"]["time_series"]:
+            vacancy_data = self.data["vacancy_rates"]["time_series"]
+            dates = [item['date'] for item in vacancy_data]
+            values = [item['value'] for item in vacancy_data]
+            
+            fig = px.line(
+                x=dates, 
+                y=values, 
+                title=f"Vacancy Rate Trend for {self.selected_geo_name}",
+                labels={"x": "Date", "y": "Vacancy Rate (%)"}
+            )
+            # Add a horizontal line at 3% (balanced market indicator)
+            fig.add_hline(y=3, line_dash="dash", line_color="green", annotation_text="Balanced Market (3%)")
+            
+            fig.update_layout(
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+                hovermode="x unified"
+            )
+            charts["vacancy_trend"] = fig
+        
+        # 3. Affordability Trend Chart
+        if "affordability" in self.data and "time_series" in self.data["affordability"] and self.data["affordability"]["time_series"]:
+            affordability_data = self.data["affordability"]["time_series"]
+            dates = [item['date'] for item in affordability_data]
+            values = [item['value'] for item in affordability_data]
+            
+            fig = px.line(
+                x=dates, 
+                y=values, 
+                title=f"Rental Affordability Trend for {self.selected_geo_name}",
+                labels={"x": "Date", "y": "% of Income on Rent"}
+            )
+            # Add a horizontal line at 30% (rental stress indicator)
+            fig.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="Rental Stress Threshold (30%)")
+            
+            fig.update_layout(
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+                hovermode="x unified"
+            )
+            charts["affordability_trend"] = fig
+        
+        # 4. Comparison Chart
+        # Create a comparison of key metrics with Greater Sydney and Rest of NSW
+        categories = ['Renters (%)', 'Social Housing (%)', 'Median Rent Increase (%)', 'Affordability (% income)']
+        
+        # Get comparison values
+        gs_values = [
+            self.GS_REFERENCE_DATA["renters"]["value"],
+            self.GS_REFERENCE_DATA["social_housing"]["value"],
+            self.GS_REFERENCE_DATA["median_rent"]["value"],
+            self.GS_REFERENCE_DATA["affordability"]["value"]
+        ]
+        
+        ron_values = [
+            self.RON_REFERENCE_DATA["renters"]["value"],
+            self.RON_REFERENCE_DATA["social_housing"]["value"],
+            self.RON_REFERENCE_DATA["median_rent"]["value"],
+            self.RON_REFERENCE_DATA["affordability"]["value"]
+        ]
+        
+        local_values = [
+            self.data["renters"]["percentage"],
+            self.data["social_housing"]["percentage"],
+            self.data["median_rent"]["annual_increase"],
+            self.data["affordability"]["percentage"]
+        ]
+        
+        # Create grouped bar chart
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            name=self.selected_geo_name,
+            x=categories,
+            y=local_values,
+            marker_color='rgb(55, 83, 109)'
+        ))
+        
+        fig.add_trace(go.Bar(
+            name='Greater Sydney',
+            x=categories,
+            y=gs_values,
+            marker_color='rgb(26, 118, 255)'
+        ))
+        
+        fig.add_trace(go.Bar(
+            name='Rest of NSW',
+            x=categories,
+            y=ron_values,
+            marker_color='rgb(56, 166, 165)'
+        ))
+        
+        fig.update_layout(
+            title=f"Comparison: {self.selected_geo_name} vs Greater Sydney & Rest of NSW",
+            barmode='group',
+            height=500,
+            margin=dict(l=20, r=20, t=40, b=80),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+        
+        charts["comparison"] = fig
+            
+        return charts
+    
+    def create_benchmarking_tab(self):
+        """Create interactive benchmarking charts to compare multiple areas"""
+        # We'll need to calculate metrics for multiple areas
+        st.write("### Area Benchmarking")
+        
+        # Get all available areas for the current selected geo type
+        all_areas = self.get_geo_names(self.selected_geo_area)
+        
+        # Let user select areas to compare
+        if len(all_areas) <= 10:
+            default_selections = all_areas[:5]  # Default select first 5 if not many areas
+        else:
+            default_selections = [self.selected_geo_name]  # Default just the current area if many options
+            
+        selected_areas = st.multiselect(
+            "Select areas to compare:",
+            options=all_areas,
+            default=default_selections
+        )
+        
+        if not selected_areas:
+            st.warning("Please select at least one area to display benchmarking data.")
+            return
+        
+        # Calculate metrics for all selected areas
+        benchmark_data = {}
+        
+        with st.spinner("Calculating metrics for selected areas..."):
+            for area_name in selected_areas:
+                # Store the current selection
+                current_geo_area = self.selected_geo_area
+                current_geo_name = self.selected_geo_name
+                
+                # Temporarily set the area to calculate metrics
+                self.selected_geo_name = area_name
+                area_data = self.collect_data_for_area(self.selected_geo_area, area_name)
+                
+                # Store the calculated metrics
+                benchmark_data[area_name] = {
+                    "Renters (%)": area_data["renters"]["percentage"] if "renters" in area_data else None,
+                    "Social Housing (%)": area_data["social_housing"]["percentage"] if "social_housing" in area_data else None,
+                    "Median Rent ($)": area_data["median_rent"]["value"] if "median_rent" in area_data else None,
+                    "Rent Increase (%)": area_data["median_rent"]["annual_increase"] if "median_rent" in area_data else None,
+                    "Vacancy Rate (%)": area_data["vacancy_rates"]["value"] if "vacancy_rates" in area_data else None,
+                    "Affordability (% income)": area_data["affordability"]["percentage"] if "affordability" in area_data else None
+                }
+                
+                # Restore the original selection
+                self.selected_geo_area = current_geo_area
+                self.selected_geo_name = current_geo_name
+        
+        # Create a DataFrame for easier charting
+        df_benchmark = pd.DataFrame.from_dict(benchmark_data, orient='index')
+        
+        # Create charts for each metric
+        st.write("#### Comparison Charts")
+        
+        metric_col1, metric_col2 = st.columns(2)
+        
+        with metric_col1:
+            # Renters Chart
+            fig_renters = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Renters (%)",
+                orientation='h',
+                title="Percentage of Renters",
+                labels={"y": f"{self.selected_geo_area}", "x": "Percentage (%)"}
+            )
+            # Add Greater Sydney and Rest of NSW reference lines
+            fig_renters.add_vline(
+                x=self.GS_REFERENCE_DATA["renters"]["value"], 
+                line_dash="dash", 
+                line_color="blue",
+                annotation_text="Greater Sydney"
+            )
+            fig_renters.add_vline(
+                x=self.RON_REFERENCE_DATA["renters"]["value"], 
+                line_dash="dash", 
+                line_color="green",
+                annotation_text="Rest of NSW"
+            )
+            st.plotly_chart(fig_renters, use_container_width=True)
+            
+            # Median Rent Chart
+            fig_rent = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Median Rent ($)",
+                orientation='h',
+                title="Median Weekly Rent",
+                labels={"y": f"{self.selected_geo_area}", "x": "Rent ($)"}
+            )
+            st.plotly_chart(fig_rent, use_container_width=True)
+            
+            # Vacancy Rate Chart
+            fig_vacancy = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Vacancy Rate (%)",
+                orientation='h',
+                title="Vacancy Rate",
+                labels={"y": f"{self.selected_geo_area}", "x": "Rate (%)"}
+            )
+            # Add reference line for balanced market (3%)
+            fig_vacancy.add_vline(
+                x=3, 
+                line_dash="dash", 
+                line_color="green",
+                annotation_text="Balanced Market (3%)"
+            )
+            st.plotly_chart(fig_vacancy, use_container_width=True)
+        
+        with metric_col2:
+            # Social Housing Chart
+            fig_social = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Social Housing (%)",
+                orientation='h',
+                title="Percentage of Social Housing",
+                labels={"y": f"{self.selected_geo_area}", "x": "Percentage (%)"}
+            )
+            # Add Greater Sydney and Rest of NSW reference lines
+            fig_social.add_vline(
+                x=self.GS_REFERENCE_DATA["social_housing"]["value"], 
+                line_dash="dash", 
+                line_color="blue",
+                annotation_text="Greater Sydney"
+            )
+            fig_social.add_vline(
+                x=self.RON_REFERENCE_DATA["social_housing"]["value"], 
+                line_dash="dash", 
+                line_color="green",
+                annotation_text="Rest of NSW"
+            )
+            st.plotly_chart(fig_social, use_container_width=True)
+            
+            # Rent Increase Chart
+            fig_increase = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Rent Increase (%)",
+                orientation='h',
+                title="Annual Rent Increase",
+                labels={"y": f"{self.selected_geo_area}", "x": "Increase (%)"}
+            )
+            # Add Greater Sydney and Rest of NSW reference lines
+            fig_increase.add_vline(
+                x=self.GS_REFERENCE_DATA["median_rent"]["value"], 
+                line_dash="dash", 
+                line_color="blue",
+                annotation_text="Greater Sydney"
+            )
+            fig_increase.add_vline(
+                x=self.RON_REFERENCE_DATA["median_rent"]["value"], 
+                line_dash="dash", 
+                line_color="green",
+                annotation_text="Rest of NSW"
+            )
+            st.plotly_chart(fig_increase, use_container_width=True)
+            
+            # Affordability Chart
+            fig_affordability = px.bar(
+                df_benchmark, 
+                y=df_benchmark.index, 
+                x="Affordability (% income)",
+                orientation='h',
+                title="Rental Affordability (% of Income)",
+                labels={"y": f"{self.selected_geo_area}", "x": "% of Income"}
+            )
+            # Add rental stress threshold line and reference lines
+            fig_affordability.add_vline(
+                x=30, 
+                line_dash="dash", 
+                line_color="red",
+                annotation_text="Rental Stress Threshold (30%)"
+            )
+            fig_affordability.add_vline(
+                x=self.GS_REFERENCE_DATA["affordability"]["value"], 
+                line_dash="dash", 
+                line_color="blue",
+                annotation_text="Greater Sydney"
+            )
+            fig_affordability.add_vline(
+                x=self.RON_REFERENCE_DATA["affordability"]["value"], 
+                line_dash="dash", 
+                line_color="green",
+                annotation_text="Rest of NSW"
+            )
+            st.plotly_chart(fig_affordability, use_container_width=True)
+        
+        # Show the data table
+        st.write("#### Benchmark Data Table")
+        # Format the table for display
+        df_formatted = df_benchmark.copy()
+        # Round all numeric columns to 1 decimal place
+        for col in df_formatted.columns:
+            df_formatted[col] = df_formatted[col].round(1)
+        st.dataframe(df_formatted, use_container_width=True)
+        
+        # Download option for the benchmark data
+        csv_data = df_benchmark.to_csv(index=True)
+        st.download_button(
+            label="Download Benchmark Data (CSV)",
+            data=csv_data,
+            file_name=f"{self.selected_geo_area}_Benchmark_Data.csv",
+            mime="text/csv"
+        )
 
-
-def collect_reference_data(analyzer, uploaded_files):
-    """Collect reference data for Greater Sydney and Rest of NSW"""
-    with st.spinner("Collecting reference data for Greater Sydney and Rest of NSW..."):
-        # Implementation has been shortened for brevity
-        pass
-
+    def create_multi_area_trend_chart(self):
+        """Create a trend chart comparing multiple areas over time"""
+        st.write("### Trend Comparison")
+        
+        # Select metric to visualize
+        metric_options = [
+            "Median Weekly Rent", 
+            "Vacancy Rate", 
+            "Rental Affordability"
+        ]
+        selected_metric = st.selectbox(
+            "Select metric to compare:", 
+            options=metric_options
+        )
+        
+        # Get metric specific details
+        metric_details = {
+            "Median Weekly Rent": {
+                "data_key": "median_rent",
+                "y_label": "Median Weekly Rent ($)",
+                "format": "${:.0f}"
+            },
+            "Vacancy Rate": {
+                "data_key": "vacancy_rates",
+                "y_label": "Vacancy Rate (%)",
+                "format": "{:.2f}%"
+            },
+            "Rental Affordability": {
+                "data_key": "affordability",
+                "y_label": "% of Income on Rent",
+                "format": "{:.1f}%"
+            }
+        }
+        
+        data_key = metric_details[selected_metric]["data_key"]
+        
+        # Get all available areas for the current selected geo type
+        all_areas = self.get_geo_names(self.selected_geo_area)
+        
+        # Let user select areas to compare
+        if len(all_areas) <= 10:
+            default_selections = all_areas[:3]  # Default select first 3 if not many areas
+        else:
+            default_selections = [self.selected_geo_name]  # Default just the current area if many options
+            
+        selected_areas = st.multiselect(
+            "Select areas to compare:",
+            options=all_areas,
+            default=default_selections,
+            key="trend_areas"
+        )
+        
+        if not selected_areas:
+            st.warning("Please select at least one area to display trend data.")
+            return
+        
+        # Create figure
+        fig = go.Figure()
+        
+        # Color palette for lines
+        colors = px.colors.qualitative.Plotly
+        
+        # Get data for each selected area
+        has_data = False
+        for i, area_name in enumerate(selected_areas):
+            # Temporarily set the area to get data
+            current_geo_name = self.selected_geo_name
+            self.selected_geo_name = area_name
+            
+            # Get data for this area
+            area_data = self.collect_data_for_area(self.selected_geo_area, area_name)
+            
+            # Check if we have time series data for this metric
+            if data_key in area_data and "time_series" in area_data[data_key] and area_data[data_key]["time_series"]:
+                has_data = True
+                time_series = area_data[data_key]["time_series"]
+                
+                # Add line to chart
+                fig.add_trace(go.Scatter(
+                    x=[item['date'] for item in time_series],
+                    y=[item['value'] for item in time_series],
+                    mode='lines+markers',
+                    name=area_name,
+                    line=dict(color=colors[i % len(colors)], width=2),
+                    marker=dict(size=6)
+                ))
+            
+            # Restore original selection
+            self.selected_geo_name = current_geo_name
+        
+        if not has_data:
+            st.warning(f"No time series data available for {selected_metric} in the selected areas.")
+            return
+            
+        # Update layout
+        fig.update_layout(
+            title=f"{selected_metric} Trends by {self.selected_geo_area}",
+            xaxis_title="Date",
+            yaxis_title=metric_details[selected_metric]["y_label"],
+            legend_title=f"{self.selected_geo_area}",
+            height=500,
+            hovermode="x unified"
+        )
+        
+        # Add reference lines based on the metric
+        if selected_metric == "Vacancy Rate":
+            # Add balanced market reference line (3%)
+            fig.add_hline(
+                y=3,
+                line_dash="dash",
+                line_color="green",
+                annotation_text="Balanced Market (3%)"
+            )
+        elif selected_metric == "Rental Affordability":
+            # Add rental stress threshold line (30%)
+            fig.add_hline(
+                y=30,
+                line_dash="dash",
+                line_color="red",
+                annotation_text="Rental Stress Threshold (30%)"
+            )
+        
+        # Display chart
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Add explanation
+        if selected_metric == "Median Weekly Rent":
+            st.info("Higher rental prices indicate higher housing costs but may also reflect higher quality housing or more desirable locations.")
+        elif selected_metric == "Vacancy Rate":
+            st.info("A vacancy rate around 3% indicates a balanced rental market. Lower rates suggest a tight market with limited availability, potentially putting upward pressure on rents.")
+        elif selected_metric == "Rental Affordability":
+            st.info("Rental affordability is measured as the percentage of income spent on rent. Any value above 30% indicates rental stress, where households may struggle to afford other necessities.")
 
 def main():
-    st.title("NSW Rental Data Analyzer")
+    st.title("Enhanced NSW Rental Data Analyzer")
     
     # Create an instance of the analyzer
     analyzer = RentalDataAnalyzer()
     
-    # Sidebar for file uploads
-    st.sidebar.header("Upload Data Files")
+    # Sidebar for root folder input and file scanning
+    st.sidebar.header("Data Sources")
     
-    # Create a dictionary to store uploaded files by category
-    uploaded_files = {
-        "median_rents": [],
-        "census_dwelling": [],
-        "census_demographics": [],
-        "affordability": [],
-        "vacancy_rates": []
-    }
+    # Allow user to input root folder path
+    root_folder = st.sidebar.text_input(
+        "Enter path to data root folder",
+        value="/path/to/your/data"
+    )
     
-    # Allow uploading multiple files for each category
-    with st.sidebar.expander("Median Rents Files", expanded=True):
-        median_rent_files = st.file_uploader("Upload Median Rents Files", 
-                                            type=["xlsx", "xls", "parquet"],
-                                            accept_multiple_files=True,
-                                            key="median_rents")
-        
-        if median_rent_files:
-            for file in median_rent_files:
-                # Save the file to a temporary location
-                temp_file_path = os.path.join(analyzer.temp_dir, file.name)
-                with open(temp_file_path, "wb") as f:
-                    f.write(file.getbuffer())
+    if st.sidebar.button("Scan Data Folder", type="primary"):
+        # Scan the root folder for data files
+        analyzer.scan_root_folder(root_folder)
+    
+    # Check if we have any files
+    has_files = False
+    if hasattr(analyzer, 'files_dict'):
+        total_files = sum(len(files) for files in analyzer.files_dict.values())
+        if total_files > 0:
+            has_files = True
+    
+    if has_files:
+        # Load all data
+        if st.sidebar.button("Load All Data"):
+            with st.spinner("Loading all data files..."):
+                analyzer.load_all_data()
                 
-                uploaded_files["median_rents"].append({
-                    "name": file.name,
-                    "path": temp_file_path
-                })
-    
-    with st.sidebar.expander("Census Dwelling Files", expanded=True):
-        census_dwelling_files = st.file_uploader("Upload Census Dwelling Files", 
-                                                type=["xlsx", "xls", "parquet"],
-                                                accept_multiple_files=True,
-                                                key="census_dwelling")
+                # Fetch comparison data
+                analyzer.fetch_comparison_area_data()
         
-        if census_dwelling_files:
-            for file in census_dwelling_files:
-                # Save the file to a temporary location
-                temp_file_path = os.path.join(analyzer.temp_dir, file.name)
-                with open(temp_file_path, "wb") as f:
-                    f.write(file.getbuffer())
-                
-                uploaded_files["census_dwelling"].append({
-                    "name": file.name,
-                    "path": temp_file_path
-                })
-    
-    with st.sidebar.expander("Affordability Files", expanded=True):
-        affordability_files = st.file_uploader("Upload Affordability Files", 
-                                            type=["xlsx", "xls", "parquet"],
-                                            accept_multiple_files=True,
-                                            key="affordability")
+        # Check if data is loaded
+        has_data = False
+        if hasattr(analyzer, 'dataframes'):
+            total_dfs = sum(len(geo_dfs) for geo_dfs in analyzer.dataframes.values())
+            if total_dfs > 0:
+                has_data = True
         
-        if affordability_files:
-            for file in affordability_files:
-                # Save the file to a temporary location
-                temp_file_path = os.path.join(analyzer.temp_dir, file.name)
-                with open(temp_file_path, "wb") as f:
-                    f.write(file.getbuffer())
-                
-                uploaded_files["affordability"].append({
-                    "name": file.name,
-                    "path": temp_file_path
-                })
-    
-    with st.sidebar.expander("Vacancy Rate Files", expanded=True):
-        vacancy_rate_files = st.file_uploader("Upload Vacancy Rate Files", 
-                                            type=["xlsx", "xls", "parquet"],
-                                            accept_multiple_files=True,
-                                            key="vacancy_rates")
-        
-        if vacancy_rate_files:
-            for file in vacancy_rate_files:
-                # Save the file to a temporary location
-                temp_file_path = os.path.join(analyzer.temp_dir, file.name)
-                with open(temp_file_path, "wb") as f:
-                    f.write(file.getbuffer())
-                
-                uploaded_files["vacancy_rates"].append({
-                    "name": file.name,
-                    "path": temp_file_path
-                })
-    
-    # Main area for geographic selection and analysis
-    st.header("Geographic Selection")
-    
-    # Check if files are uploaded
-    files_uploaded = any(len(category_files) > 0 for category_files in uploaded_files.values())
-    
-    if not files_uploaded:
-        st.warning("Please upload at least one data file to begin analysis.")
-    else:
-        # Display the number of files uploaded
-        total_files = sum(len(category_files) for category_files in uploaded_files.values())
-        st.success(f"{total_files} files uploaded successfully")
-        
-        # Geographic area type selection
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            geo_area = st.selectbox("Select Geographic Area Type:", analyzer.GEO_AREAS)
+        if has_data:
+            # Get available geographic areas
+            available_geo_areas = analyzer.get_available_geo_areas()
+            
+            # Display options in the sidebar
+            st.sidebar.header("Geographic Selection")
+            
+            # Geographic area type selection
+            geo_area = st.sidebar.selectbox(
+                "Select Geographic Area Type:", 
+                options=available_geo_areas
+            )
             
             if geo_area:
                 analyzer.selected_geo_area = geo_area
                 
                 # Get available geographic names
-                with st.spinner(f"Loading {geo_area} names..."):
-                    geo_names = analyzer.get_geo_names(geo_area, uploaded_files)
+                geo_names = analyzer.get_geo_names(geo_area)
                 
                 if geo_names:
-                    st.success(f"Found {len(geo_names)} {geo_area} names")
-                    
                     # Display a select box with available names
-                    with col2:
-                        geo_name = st.selectbox("Select Geographic Name:", geo_names)
-                        
-                        if geo_name:
-                            analyzer.selected_geo_name = geo_name
-                else:
-                    st.error(f"No {geo_area} names found in the uploaded files.")
-        
-        # Check if both geo area and name are selected
-        if analyzer.selected_geo_area and analyzer.selected_geo_name:
-            st.header("Analysis Options")
-            
-            # Generate button - THIS IS NOW CORRECTLY INSIDE THE FUNCTION AND PROPERLY INDENTED
-            if st.button("Generate Analysis", type="primary"):
-                with st.spinner("Analyzing rental data..."):
-                    # First fetch actual comparison data for Greater Sydney and Rest of NSW
-                    comparison_data = analyzer.fetch_comparison_area_data(uploaded_files)
-
-                    # Then collect data and analyze the selected area
-                    analyzer.collect_data(uploaded_files)
+                    geo_name = st.sidebar.selectbox(
+                        "Select Geographic Name:", 
+                        options=geo_names
+                    )
                     
-                    # Update the comparison data in self.data with the dynamically fetched values
-                    if "Greater Sydney" in comparison_data and "median_rent" in comparison_data["Greater Sydney"] and comparison_data["Greater Sydney"]["median_rent"] is not None:
-                        analyzer.data["median_rent"]["comparison_gs"]["value"] = comparison_data["Greater Sydney"]["median_rent"]
+                    if geo_name:
+                        analyzer.selected_geo_name = geo_name
                         
-                    if "Rest of NSW" in comparison_data and "median_rent" in comparison_data["Rest of NSW"] and comparison_data["Rest of NSW"]["median_rent"] is not None:
-                        analyzer.data["median_rent"]["comparison_ron"]["value"] = comparison_data["Rest of NSW"]["median_rent"]
-                                     
-                    # Create tabs for different views
-                    tab1, tab2 = st.tabs(["Analysis Summary", "Raw Data"])
-                    
-                    with tab1:
-                        st.subheader(f"Rental Market Analysis for {analyzer.selected_geo_name} ({analyzer.selected_geo_area})")
+                        # Collect data for the selected area
+                        with st.spinner(f"Analyzing data for {geo_name}..."):
+                            analyzer.collect_data_for_area(geo_area, geo_name)
                         
-                        # Display summary cards
-                        metric_col1, metric_col2, metric_col3 = st.columns(3)
+                        # Create tabs for different views
+                        tab1, tab2, tab3, tab4 = st.tabs([
+                            "Summary Dashboard", 
+                            "Area Benchmarking", 
+                            "Trend Analysis",
+                            "Export"
+                        ])
                         
-                        with metric_col1:
-                            # Remove delta for renters count since it's a static number
-                            st.metric(
-                                label="Renters", 
-                                value=f"{analyzer.data['renters']['percentage']}%"
-                            )
-                            st.write(f"{analyzer.data['renters']['count']:,} households")
+                        with tab1:
+                            st.header(f"Rental Market Dashboard: {geo_name} ({geo_area})")
                             
-                            # Remove delta for social housing count since it's a static number
-                            st.metric(
-                                label="Social Housing", 
-                                value=f"{analyzer.data['social_housing']['percentage']}%"
-                            )
-                            st.write(f"{analyzer.data['social_housing']['count']:,} dwellings")
-                        
-                        with metric_col2:
-                            st.metric(
-                                label="Median Weekly Rent", 
-                                value=f"${analyzer.data['median_rent']['value']}",
-                                delta=f"{analyzer.data['median_rent']['annual_increase']}% annual increase"
-                            )
+                            # Display summary cards
+                            metric_col1, metric_col2, metric_col3 = st.columns(3)
                             
-                            # Format vacancy rate for display
-                            vacancy_value = analyzer.data['vacancy_rates']['value']
-                            if vacancy_value < 1 and vacancy_value > 0:
-                                vacancy_display = f"{vacancy_value:.2f}%"
-                            else:
-                                vacancy_display = f"{vacancy_value:.2f}%"
+                            with metric_col1:
+                                st.metric(
+                                    label="Renters", 
+                                    value=f"{analyzer.data['renters']['percentage']}%"
+                                )
+                                st.write(f"{analyzer.data['renters']['count']:,} households")
                                 
-                            st.metric(
-                                label="Vacancy Rate", 
-                                value=vacancy_display,
-                                delta=None
-                            )
+                                st.metric(
+                                    label="Social Housing", 
+                                    value=f"{analyzer.data['social_housing']['percentage']}%"
+                                )
+                                st.write(f"{analyzer.data['social_housing']['count']:,} dwellings")
                             
-                            # Show previous year rate
-                            if analyzer.data['vacancy_rates']['previous_year_rate'] is not None:
-                                prev_rate = analyzer.data['vacancy_rates']['previous_year_rate']
-                                if prev_rate < 1 and prev_rate > 0:
-                                    prev_display = f"{prev_rate:.2f}%"
+                            with metric_col2:
+                                st.metric(
+                                    label="Median Weekly Rent", 
+                                    value=f"${analyzer.data['median_rent']['value']}",
+                                    delta=f"{analyzer.data['median_rent']['annual_increase']}% annual increase"
+                                )
+                                
+                                # Format vacancy rate for display
+                                vacancy_value = analyzer.data['vacancy_rates']['value']
+                                if vacancy_value < 1 and vacancy_value > 0:
+                                    vacancy_display = f"{vacancy_value:.2f}%"
                                 else:
-                                    prev_display = f"{prev_rate:.2f}%"
-                                st.write(f"Was {prev_display} a year ago")
-                        
-                        with metric_col3:
-                            st.metric(
-                                label="Rental Affordability", 
-                                value=f"{analyzer.data['affordability']['percentage']}% of income"
-                            )
+                                    vacancy_display = f"{vacancy_value:.2f}%"
+                                    
+                                st.metric(
+                                    label="Vacancy Rate", 
+                                    value=vacancy_display
+                                )
+                                
+                                # Show previous year rate
+                                if analyzer.data['vacancy_rates']['previous_year_rate'] is not None:
+                                    prev_rate = analyzer.data['vacancy_rates']['previous_year_rate']
+                                    if prev_rate < 1 and prev_rate > 0:
+                                        prev_display = f"{prev_rate:.2f}%"
+                                    else:
+                                        prev_display = f"{prev_rate:.2f}%"
+                                    st.write(f"Was {prev_display} a year ago")
                             
-                            # Show previous year value instead of improvement/deterioration
-                            if "previous_year_percentage" in analyzer.data['affordability']:
-                                st.write(f"Was {analyzer.data['affordability']['previous_year_percentage']}% of income a year ago")
-                            elif "annual_improvement" in analyzer.data['affordability'] and analyzer.data['affordability']['annual_improvement'] != 0:
-                                current = analyzer.data['affordability']['percentage']
-                                improvement = analyzer.data['affordability']['annual_improvement']
-                                previous = current + improvement if improvement < 0 else current - improvement
-                                st.write(f"Was {previous:.1f}% of income a year ago")
+                            with metric_col3:
+                                st.metric(
+                                    label="Rental Affordability", 
+                                    value=f"{analyzer.data['affordability']['percentage']}% of income"
+                                )
+                                
+                                # Show previous year value
+                                if "previous_year_percentage" in analyzer.data['affordability']:
+                                    st.write(f"Was {analyzer.data['affordability']['previous_year_percentage']}% of income a year ago")
+                                elif "annual_improvement" in analyzer.data['affordability'] and analyzer.data['affordability']['annual_improvement'] != 0:
+                                    current = analyzer.data['affordability']['percentage']
+                                    improvement = analyzer.data['affordability']['annual_improvement']
+                                    previous = current + improvement if improvement < 0 else current - improvement
+                                    st.write(f"Was {previous:.1f}% of income a year ago")
+                                else:
+                                    st.write("Previous year data not available")
+                            
+                            # Display charts
+                            st.subheader("Trend Analysis")
+                            charts = analyzer.create_dashboard_charts()
+                            
+                            # Display available charts in two columns
+                            if charts:
+                                chart_col1, chart_col2 = st.columns(2)
+                                
+                                with chart_col1:
+                                    if "rent_trend" in charts:
+                                        st.plotly_chart(charts["rent_trend"], use_container_width=True)
+                                    
+                                    if "affordability_trend" in charts:
+                                        st.plotly_chart(charts["affordability_trend"], use_container_width=True)
+                                
+                                with chart_col2:
+                                    if "vacancy_trend" in charts:
+                                        st.plotly_chart(charts["vacancy_trend"], use_container_width=True)
+                                    
+                                    if "comparison" in charts:
+                                        st.plotly_chart(charts["comparison"], use_container_width=True)
                             else:
-                                st.write("Previous year data not available")
-                        
-                        # Display comparison comments
-                        st.subheader("Comparative Analysis")
-                        
-                        st.info(analyzer.generate_comparison_comment("renters", analyzer.data['renters']['percentage'], 
+                                st.warning("No trend data available for charts. This may be due to limited time series data in the loaded files.")
+                            
+                            # Comparison analysis
+                            st.subheader("Comparative Analysis")
+                            
+                            st.info(analyzer.generate_comparison_comment("renters", analyzer.data['renters']['percentage'], 
                                                     analyzer.data['renters']['comparison_gs'], analyzer.data['renters']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("social_housing", analyzer.data['social_housing']['percentage'], 
+                            
+                            st.info(analyzer.generate_comparison_comment("social_housing", analyzer.data['social_housing']['percentage'], 
                                                     analyzer.data['social_housing']['comparison_gs'], analyzer.data['social_housing']['comparison_ron']))
-                        
-                        # st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
-                        #                            analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("vacancy_rates", analyzer.data['vacancy_rates']['value'], 
+                            
+                            st.info(analyzer.generate_comparison_comment("median_rent", analyzer.data['median_rent']['value'], 
+                                                    analyzer.data['median_rent']['comparison_gs'], analyzer.data['median_rent']['comparison_ron']))
+                            
+                            st.info(analyzer.generate_comparison_comment("vacancy_rates", analyzer.data['vacancy_rates']['value'], 
                                                     analyzer.data['vacancy_rates']['comparison_gs'], analyzer.data['vacancy_rates']['comparison_ron']))
-                        
-                        st.info(analyzer.generate_comparison_comment("affordability", analyzer.data['affordability']['percentage'], 
+                            
+                            st.info(analyzer.generate_comparison_comment("affordability", analyzer.data['affordability']['percentage'], 
                                                     analyzer.data['affordability']['comparison_gs'], analyzer.data['affordability']['comparison_ron']))
                         
-                        # Generate Excel file
-                        excel_data = analyzer.create_excel_output()
+                        with tab2:
+                            # Create benchmarking charts
+                            analyzer.create_benchmarking_tab()
                         
-                        # Provide a download button for the Excel file
-                        st.download_button(
-                            label="Download Excel Report",
-                            data=excel_data,
-                            file_name=f"{analyzer.selected_geo_name}_{analyzer.selected_geo_area}_Rental_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    
-                    with tab2:
-                        st.subheader("Raw Data")
+                        with tab3:
+                            # Create multi-area trend comparison
+                            analyzer.create_multi_area_trend_chart()
                         
-                        # Display raw data in expandable sections
-                        with st.expander("Renters Data"):
-                            st.json(analyzer.data["renters"])
-                        
-                        with st.expander("Social Housing Data"):
-                            st.json(analyzer.data["social_housing"])
-                        
-                        with st.expander("Median Rent Data"):
-                            st.json(analyzer.data["median_rent"])
-                        
-                        with st.expander("Vacancy Rate Data"):
-                            st.json(analyzer.data["vacancy_rates"])
-                        
-                        with st.expander("Affordability Data"):
-                            st.json(analyzer.data["affordability"])
-
+                        with tab4:
+                            st.header("Export Options")
+                            
+                            # Generate Excel report
+                            excel_data = analyzer.create_excel_output()
+                            
+                            # Provide a download button for the Excel file
+                            st.download_button(
+                                label="Download Excel Report",
+                                data=excel_data,
+                                file_name=f"{analyzer.selected_geo_name}_{analyzer.selected_geo_area}_Rental_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                            
+                            # Raw data view
+                            st.subheader("Raw Data")
+                            
+                            # Display raw data in expandable sections
+                            with st.expander("Renters Data"):
+                                st.json(analyzer.data["renters"])
+                            
+                            with st.expander("Social Housing Data"):
+                                st.json(analyzer.data["social_housing"])
+                            
+                            with st.expander("Median Rent Data"):
+                                st.json(analyzer.data["median_rent"])
+                            
+                            with st.expander("Vacancy Rate Data"):
+                                st.json(analyzer.data["vacancy_rates"])
+                            
+                            with st.expander("Affordability Data"):
+                                st.json(analyzer.data["affordability"])
+                else:
+                    st.error(f"No geographic names found for {geo_area}. Check your data files.")
+    else:
+        st.info("Please scan a data folder using the option in the sidebar to begin.")
+    
     # Add footnote and info
     st.markdown("---")
     st.caption("* Methodology: Rental affordability is calculated by taking median weekly rental household incomes and comparing to median weekly rents. Any number higher than 30% of income on rent is considered rental stress.")
     st.caption("Source: NSW Fair Trading using ABS Census and Core Logic rental data")
 
 if __name__ == "__main__":
-    main()
+    main()matches.append(value)
+                        
+                        if matches:
+                            best_match = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # Calculate rental percentage
+                        total_dwellings = None
+                        if "dwellings" in df_filtered.columns:
+                            total_dwellings = float(df_filtered["dwellings"].iloc[0]) if not pd.isna(df_filtered["dwellings"].iloc[0]) else 0
+                        
+                        total_rented = None
+                        if "dwellings_rented" in df_filtered.columns:
+                            total_rented = float(df_filtered["dwellings_rented"].iloc[0]) if not pd.isna(df_filtered["dwellings_rented"].iloc[0]) else 0
+                        
+                        # Calculate percentage if we have the raw counts
+                        if total_dwellings is not None and total_rented is not None and total_dwellings > 0:
+                            rental_pct = (total_rented / total_dwellings) * 100
+                            rental_count = int(total_rented)
+                            
+                            self.data["renters"] = {
+                                "percentage": round(rental_pct, 1),
+                                "count": rental_count,
+                                "period": "2021",
+                                "source": "ABS Census",
+                                "comparison_gs": self.GS_REFERENCE_DATA["renters"],
+                                "comparison_ron": self.RON_REFERENCE_DATA["renters"]
+                            }
+                        
+                        # Find social housing data
+                        social_housing_sha = 0
+                        social_housing_chp = 0
+                        
+                        # Get SHA data
+                        if "dwellings_rented_sha" in df_filtered.columns:
+                            sha_value = df_filtered["dwellings_rented_sha"].iloc[0]
+                            social_housing_sha = float(sha_value) if not pd.isna(sha_value) else 0
+                        
+                        # Get CHP data
+                        if "dwellings_rented_chp" in df_filtered.columns:
+                            chp_value = df_filtered["dwellings_rented_chp"].iloc[0]
+                            social_housing_chp = float(chp_value) if not pd.isna(chp_value) else 0
+                        
+                        # Calculate total social housing
+                        total_social = social_housing_sha + social_housing_chp
+                        
+                        # Calculate social housing percentage
+                        if total_dwellings is not None and total_dwellings > 0:
+                            social_pct = (total_social / total_dwellings) * 100
+                            social_count = int(total_social)
+                            
+                            self.data["social_housing"] = {
+                                "percentage": round(social_pct, 1),
+                                "count": social_count,
+                                "period": "2021",
+                                "source": "ABS Census",
+                                "comparison_gs": self.GS_REFERENCE_DATA["social_housing"],
+                                "comparison_ron": self.RON_REFERENCE_DATA["social_housing"]
+                            }
+        except Exception as e:
+            st.error(f"Error collecting census data: {str(e)}")
+    
+    def collect_median_rent_data(self):
+        """Collect median rent data"""
+        try:
+            # Check if we have median rent data for the selected geo area
+            if self.selected_geo_area in self.dataframes["median_rents"]:
+                df = self.dataframes["median_rents"][self.selected_geo_area]
+                
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                
+                if geo_col:
+                    # Ensure both values are strings for comparison
+                    df[geo_col] = df[geo_col].astype(str)
+                    selected_name_str = str(self.selected_geo_name)
+                    
+                    # Check for exact match
+                    df_filtered = df[df[geo_col] == selected_name_str]
+                    if df_filtered.empty:
+                        # Try partial match
+                        matches = []
+                        for value in df[geo_col].dropna().unique():
+                            if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
+                                matches.append(value)
+                        
+                        if matches:
+                            best_match = matches[0]  # Use the first match for simplicity
+                            df_filtered = df[df[geo_col] == best_match]
+                    
+                    if not df_filtered.empty:
+                        # If we have a month column, get the most recent month
+                        latest_month = None
+                        if 'month' in df_filtered.columns:
+                            try:
+                                df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
+                                latest_month = df_filtered['month'].max()
+                                
+                                # Format latest_month for output
+                                latest_month_str = latest_month.strftime("%b-%Y")
+                                
+                                df_latest = df_filtered[df_filtered['month'] == latest_month]
+                                
+                                # Find data from 12 months ago
+                                one_year_ago = latest_month - pd.DateOffset(months=12)
+                                df_year_ago = df_filtered[df_filtered['month'] == one_year_ago]
+                                
+                                if df_year_ago.empty:
+                                    # Try to find the closest month before one year ago
+                                    prior_months = df_filtered[df_filtered['month'] < one_year_ago]['month']
+                                    if not prior_months.empty:
+                                        closest_prior_month = prior_months.max()
+                                        df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
+                            except Exception as e:
+                                st.warning(f"Error processing dates: {str(e)}")
+                                df_latest = df_filtered
+                                df_year_ago = pd.DataFrame()  # Empty DataFrame if we couldn't process dates
+                        else:
+                            df_latest = df_filtered
+                            df_year_ago = pd.DataFrame()  # Empty DataFrame if no month column
+                            
+                        # If we have property_type, get the "All Dwellings" type
+                        if 'property_type' in df_latest.columns:
+                            if 'All Dwellings' in df_latest['property_type'].values:
+                                df_latest = df_latest[df_latest['property_type'] == 'All Dwellings']
+                                # Also filter year ago data if we have it
+                                if not df_year_ago.empty and 'property_type' in df_year_ago.columns:
+                                    if 'All Dwellings' in df_year_ago['property_type'].values:
+                                        df_year_ago = df_year_ago[df_year_ago['property_type'] == 'All Dwellings']
+                        
+                        # Find columns for median rent data - prefer 3-month median
+                        rent_col = None
+                        for col_prefix in ['median_rent_3mo', 'median_rent_1mo', 'median_rent', 'rent_median']:
+                            for col in df_latest.columns:
+                                if col.startswith(col_prefix) and not any(x in col for x in ['growth', 'increase', 'change']):
+                                    rent_col = col
+                                    break
+                            if rent_col:
+                                break
+                                
+                        # Find annual growth column
+                        growth_col = None
+                        for col_suffix in ['annual_growth', 'annual_increase', 'yearly_growth', 'yearly_increase']:
+                            for col in df_latest.columns:
+                                if col.endswith(col_suffix):
+                                    growth_col = col
+                                    break
+                            if growth_col:
+                                break
+                        
+                        # Extract data
+                        if rent_col:
+                            # Get the median rent value
+                            if len(df_latest) > 0:
+                                rent_value = float(df_latest[rent_col].iloc[0]) if not pd.isna(df_latest[rent_col].iloc[0]) else 0
+                                
+                                # Get annual increase - prefer to calculate from year ago data
+                                annual_increase = None
+                                prev_year_rent = None
+                                
+                                # Method 1: Calculate from year ago data (most accurate)
+                                if not df_year_ago.empty and rent_col in df_year_ago.columns:
+                                    prev_year_rent = float(df_year_ago[rent_col].iloc[0]) if not pd.isna(df_year_ago[rent_col].iloc[0]) else 0
+                                    
+                                    if prev_year_rent > 0:
+                                        annual_increase = ((rent_value - prev_year_rent) / prev_year_rent) * 100
+                                
+                                # Method 2: Use provided annual increase column
+                                if annual_increase is None and growth_col and len(df_latest) > 0:
+                                    annual_increase_value = df_latest[growth_col].iloc[0]
+                                    if not pd.isna(annual_increase_value):
+                                        annual_increase = float(annual_increase_value) * 100 if float(annual_increase_value) < 1 else float(annual_increase_value)
+                                        
+                                        # If we have current rent and annual increase but not previous rent, calculate it
+                                        if prev_year_rent is None:
+                                            prev_year_rent = rent_value / (1 + (annual_increase / 100))
+                                
+                                self.data["median_rent"] = {
+                                    "value": int(round(rent_value, 0)),
+                                    "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
+                                    "source": "NSW Fair Trading Corelogic Data",
+                                    "annual_increase": round(annual_increase, 1) if annual_increase is not None else 0,
+                                    "previous_year_rent": int(round(prev_year_rent, 0)) if prev_year_rent is not None else None,
+                                    "comparison_gs": self.GS_REFERENCE_DATA["median_rent"],
+                                    "comparison_ron": self.RON_REFERENCE_DATA["median_rent"],
+                                    "time_series": self.extract_time_series_data(df_filtered, rent_col)
+                                }
+        except Exception as e:
+            st.error(f"Error collecting median rent data: {str(e)}")
+    
+    def extract_time_series_data(self, df, value_col):
+        """Extract time series data from a dataframe if it has a month column"""
+        if 'month' not in df.columns or value_col not in df.columns:
+            return None
+            
+        try:
+            # Ensure month is datetime
+            df['month'] = pd.to_datetime(df['month'], errors='coerce')
+            
+            # Sort by month
+            df_sorted = df.sort_values('month')
+            
+            # Create time series data
+            time_series = []
+            for _, row in df_sorted.iterrows():
+                if not pd.isna(row[value_col]):
+                    time_series.append({
+                        'date': row['month'].strftime('%Y-%m-%d'),
+                        'value': float(row[value_col])
+                    })
+            
+            return time_series
+        except Exception as e:
+            st.warning(f"Could not extract time series data: {str(e)}")
+            return None
+    
+    def collect_vacancy_rate_data(self):
+        """Collect vacancy rate data"""
+        try:
+            # Check if we have vacancy rate data for the selected geo area
+            if self.selected_geo_area in self.dataframes["vacancy_rates"]:
+                df = self.dataframes["vacancy_rates"][self.selected_geo_area]
+                
+                # Find the geographic column
+                geo_col = self.find_geographic_column(df, self.selected_geo_area)
+                
+                if geo_col:
+                    # Ensure both values are strings for comparison
+                    df[geo_col] = df[geo_col].astype(str)
+                    selected_name_str = str(self.selected_geo_name)
+                    
+                    # Check for exact match
+                    df_filtered = df[df[geo_col] == selected_name_str]
+                    if df_filtered.empty:
+                        # Try partial match
+                        matches = []
+                        for value in df[geo_col].dropna().unique():
+                            if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
