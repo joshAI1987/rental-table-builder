@@ -290,9 +290,26 @@ def extract_time_series(df, date_col, value_col):
         dates = df_sorted.loc[mask, date_col].dt.strftime('%Y-%m-%d').tolist()
         values = df_sorted.loc[mask, value_col].astype(float).tolist()
         
-        # Create the time series data using list comprehension
-        return [{'date': date, 'value': value} for date, value in zip(dates, values)]
-    except Exception:
+        # Add property_type if it exists
+        time_series = []
+        if 'property_type' in df_sorted.columns:
+            property_types = df_sorted.loc[mask, 'property_type'].tolist()
+            for date, value, property_type in zip(dates, values, property_types):
+                time_series.append({
+                    'date': date,
+                    'value': value,
+                    'property_type': property_type
+                })
+        else:
+            for date, value in zip(dates, values):
+                time_series.append({
+                    'date': date,
+                    'value': value
+                })
+        
+        return time_series
+    except Exception as e:
+        print(f"Error in extract_time_series: {str(e)}")
         return None
 
 @st.cache_data
@@ -512,12 +529,18 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
                                         # If we have current rent and annual increase but not previous rent, calculate it
                                         if prev_year_rent is None:
                                             prev_year_rent = rent_value / (1 + (annual_increase / 100))
-                                
-                                # Create time series data if month column exists
-                                time_series = None
-                                if 'month' in df_filtered.columns and rent_col in df_filtered.columns:
-                                    time_series = extract_time_series(df_filtered, 'month', rent_col)
-                                
+
+
+                            # Filter time series data for "All Dwellings" if property type exists
+                            if 'property_type' in df_filtered.columns and 'All Dwellings' in df_filtered['property_type'].values:
+                                df_filtered = df_filtered[df_filtered['property_type'] == 'All Dwellings']
+                            
+                            # Create time series data
+                            time_series = None
+                            if 'month' in df_filtered.columns and rent_col in df_filtered.columns:
+                                time_series = extract_time_series(df_filtered, 'month', rent_col)
+    
+                                                              
                                 data["median_rent"] = {
                                     "value": int(round(rent_value, 0)),
                                     "period": latest_month.strftime("%b-%Y") if latest_month is not None else "Apr-2025",
@@ -557,6 +580,10 @@ def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_fil
                         df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
+                            # Filter for "All Dwellings" property type if it exists
+                            if 'property_type' in df_filtered.columns and 'All Dwellings' in df_filtered['property_type'].values:
+                                df_filtered = df_filtered[df_filtered['property_type'] == 'All Dwellings']
+                            
                             # Optimize datetime handling
                             df_filtered = optimize_datetime_handling(df_filtered)
                             
@@ -610,10 +637,15 @@ def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_fil
                                 except Exception:
                                     previous_year_rate = None
                             
-                            # Create time series data if month column exists
+                            # Filter time series data for "All Dwellings" if property type exists
+                            if 'property_type' in df_filtered.columns and 'All Dwellings' in df_filtered['property_type'].values:
+                                df_filtered = df_filtered[df_filtered['property_type'] == 'All Dwellings']
+                            
+                            # Create time series data
                             time_series = None
                             if 'month' in df_filtered.columns and rate_col in df_filtered.columns:
                                 time_series = extract_time_series(df_filtered, 'month', rate_col)
+    
                             
                             # Extract data
                             if rate_col and df_latest is not None and len(df_latest) > 0:
@@ -658,6 +690,13 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                         df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
+                            # Filter for "All Dwellings" property type if it exists
+                            if 'property_type' in df_filtered.columns and 'All Dwellings' in df_filtered['property_type'].values:
+                                df_filtered = df_filtered[df_filtered['property_type'] == 'All Dwellings']
+                            
+                            # Optimize datetime handling
+                            df_filtered = optimize_datetime_handling(df_filtered)
+                            
                             # Optimize datetime handling
                             df_filtered = optimize_datetime_handling(df_filtered)
                             
@@ -719,17 +758,22 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                                     if pct_col:
                                         break
                             
-                            # Create time series data if month column exists
+                            # Filter time series data for "All Dwellings" if property type exists
+                            if 'property_type' in df_filtered.columns and 'All Dwellings' in df_filtered['property_type'].values:
+                                df_filtered = df_filtered[df_filtered['property_type'] == 'All Dwellings']
+                            
+                            # Create time series data
                             time_series = None
                             if 'month' in df_filtered.columns and pct_col in df_filtered.columns:
                                 time_series = extract_time_series(df_filtered, 'month', pct_col)
-                                
+    
+                               
                                 # Convert decimal values to percentages if needed
                                 if time_series:
                                     for point in time_series:
                                         if point['value'] > 0 and point['value'] < 1:
                                             point['value'] = point['value'] * 100
-                            
+                                                      
                             # Extract current affordability value
                             if pct_col and df_latest is not None and len(df_latest) > 0:
                                 pct_value = float(df_latest[pct_col].iloc[0]) if not pd.isna(df_latest[pct_col].iloc[0]) else 0
@@ -1417,7 +1461,7 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
         st.header("Historical Trends")
         
         tabs = st.tabs(["Median Rent", "Vacancy Rates", "Affordability"])
-        
+    
         # Median Rent Tab
         with tabs[0]:
             rent_series = data.get("median_rent", {}).get("time_series")
@@ -1426,42 +1470,74 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_rent = pd.DataFrame(rent_series)
                 df_rent['date'] = pd.to_datetime(df_rent['date'])
                 
-                # Apply smoothing
-                df_rent_smooth = smooth_time_series(df_rent, 'value', window=5)
-                
-                # Create the chart with both raw and smoothed data
+                # Create the chart with multiple property types
                 fig = go.Figure()
                 
-                # Add raw data as a light line
-                fig.add_trace(go.Scatter(
-                    x=df_rent['date'], 
-                    y=df_rent['value'],
-                    mode='lines',
-                    name='Raw Data',
-                    line=dict(color='lightblue', width=1)
-                ))
-                
-                # Add smoothed data as a darker line
-                fig.add_trace(go.Scatter(
-                    x=df_rent_smooth['date'], 
-                    y=df_rent_smooth['value_smoothed'],
-                    mode='lines',
-                    name='Smoothed (5-month avg)',
-                    line=dict(color='blue', width=3)
-                ))
+                # Check if property_type exists
+                if 'property_type' in df_rent.columns:
+                    # Group by property type
+                    property_types = sorted(df_rent['property_type'].unique())
+                    
+                    # Define colors for different property types
+                    colors = {
+                        'Dwellings': 'blue', 
+                        'Houses': 'green', 
+                        'Units': 'red',
+                        'All Dwellings': 'blue',
+                        '1 Bedroom': 'purple',
+                        '2 Bedroom': 'orange',
+                        '3 Bedroom': 'brown',
+                        '4+ Bedroom': 'pink'
+                    }
+                    
+                    # Add a line for each property type
+                    for prop_type in property_types:
+                        df_type = df_rent[df_rent['property_type'] == prop_type]
+                        
+                        # Apply smoothing
+                        df_smooth = smooth_time_series(df_type, 'value', window=5)
+                        
+                        # Choose color (default to gray if not in our color map)
+                        color = colors.get(prop_type, 'gray')
+                        
+                        # Add to plot
+                        fig.add_trace(go.Scatter(
+                            x=df_smooth['date'], 
+                            y=df_smooth['value_smoothed'],
+                            mode='lines',
+                            name=prop_type,
+                            line=dict(color=color, width=2)
+                        ))
+                else:
+                    # If no property types, just plot the data as is
+                    df_smooth = smooth_time_series(df_rent, 'value', window=5)
+                    fig.add_trace(go.Scatter(
+                        x=df_smooth['date'], 
+                        y=df_smooth['value_smoothed'],
+                        mode='lines',
+                        name='Median Rent',
+                        line=dict(color='blue', width=2)
+                    ))
                 
                 # Update layout
                 fig.update_layout(
                     title=f"Median Weekly Rent for {selected_geo_name}",
                     xaxis_title="Date",
                     yaxis_title="Median Rent ($)",
-                    hovermode="x unified"
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No time series data available for median rent.")
-        
+    
         # Vacancy Rates Tab
         with tabs[1]:
             vacancy_series = data.get("vacancy_rates", {}).get("time_series")
@@ -1470,29 +1546,54 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_vacancy = pd.DataFrame(vacancy_series)
                 df_vacancy['date'] = pd.to_datetime(df_vacancy['date'])
                 
-                # Apply smoothing
-                df_vacancy_smooth = smooth_time_series(df_vacancy, 'value', window=5)
-                
-                # Create the chart with both raw and smoothed data
+                # Create the chart with multiple property types
                 fig = go.Figure()
                 
-                # Add raw data as a light line
-                fig.add_trace(go.Scatter(
-                    x=df_vacancy['date'], 
-                    y=df_vacancy['value'],
-                    mode='lines',
-                    name='Raw Data',
-                    line=dict(color='lightgreen', width=1)
-                ))
-                
-                # Add smoothed data as a darker line
-                fig.add_trace(go.Scatter(
-                    x=df_vacancy_smooth['date'], 
-                    y=df_vacancy_smooth['value_smoothed'],
-                    mode='lines',
-                    name='Smoothed (5-month avg)',
-                    line=dict(color='green', width=3)
-                ))
+                # Check if property_type exists
+                if 'property_type' in df_vacancy.columns:
+                    # Group by property type
+                    property_types = sorted(df_vacancy['property_type'].unique())
+                    
+                    # Define colors for different property types
+                    colors = {
+                        'Dwellings': 'blue', 
+                        'Houses': 'green', 
+                        'Units': 'red',
+                        'All Dwellings': 'blue',
+                        '1 Bedroom': 'purple',
+                        '2 Bedroom': 'orange',
+                        '3 Bedroom': 'brown',
+                        '4+ Bedroom': 'pink'
+                    }
+                    
+                    # Add a line for each property type
+                    for prop_type in property_types:
+                        df_type = df_vacancy[df_vacancy['property_type'] == prop_type]
+                        
+                        # Apply smoothing
+                        df_smooth = smooth_time_series(df_type, 'value', window=5)
+                        
+                        # Choose color (default to gray if not in our color map)
+                        color = colors.get(prop_type, 'gray')
+                        
+                        # Add to plot
+                        fig.add_trace(go.Scatter(
+                            x=df_smooth['date'], 
+                            y=df_smooth['value_smoothed'],
+                            mode='lines',
+                            name=prop_type,
+                            line=dict(color=color, width=2)
+                        ))
+                else:
+                    # If no property types, just plot the data as is
+                    df_smooth = smooth_time_series(df_vacancy, 'value', window=5)
+                    fig.add_trace(go.Scatter(
+                        x=df_smooth['date'], 
+                        y=df_smooth['value_smoothed'],
+                        mode='lines',
+                        name='Vacancy Rate',
+                        line=dict(color='green', width=2)
+                    ))
                 
                 # Add reference line at 3% (generally considered a balanced market)
                 fig.add_hline(
@@ -1508,13 +1609,20 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                     title=f"Vacancy Rate for {selected_geo_name}",
                     xaxis_title="Date",
                     yaxis_title="Vacancy Rate (%)",
-                    hovermode="x unified"
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No time series data available for vacancy rates.")
-        
+    
         # Affordability Tab
         with tabs[2]:
             affordability_series = data.get("affordability", {}).get("time_series")
@@ -1523,29 +1631,54 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_afford = pd.DataFrame(affordability_series)
                 df_afford['date'] = pd.to_datetime(df_afford['date'])
                 
-                # Apply smoothing
-                df_afford_smooth = smooth_time_series(df_afford, 'value', window=5)
-                
-                # Create the chart with both raw and smoothed data
+                # Create the chart with multiple property types
                 fig = go.Figure()
                 
-                # Add raw data as a light line
-                fig.add_trace(go.Scatter(
-                    x=df_afford['date'], 
-                    y=df_afford['value'],
-                    mode='lines',
-                    name='Raw Data',
-                    line=dict(color='lightcoral', width=1)
-                ))
-                
-                # Add smoothed data as a darker line
-                fig.add_trace(go.Scatter(
-                    x=df_afford_smooth['date'], 
-                    y=df_afford_smooth['value_smoothed'],
-                    mode='lines',
-                    name='Smoothed (5-month avg)',
-                    line=dict(color='red', width=3)
-                ))
+                # Check if property_type exists
+                if 'property_type' in df_afford.columns:
+                    # Group by property type
+                    property_types = sorted(df_afford['property_type'].unique())
+                    
+                    # Define colors for different property types
+                    colors = {
+                        'Dwellings': 'blue', 
+                        'Houses': 'green', 
+                        'Units': 'red',
+                        'All Dwellings': 'blue',
+                        '1 Bedroom': 'purple',
+                        '2 Bedroom': 'orange',
+                        '3 Bedroom': 'brown',
+                        '4+ Bedroom': 'pink'
+                    }
+                    
+                    # Add a line for each property type
+                    for prop_type in property_types:
+                        df_type = df_afford[df_afford['property_type'] == prop_type]
+                        
+                        # Apply smoothing
+                        df_smooth = smooth_time_series(df_type, 'value', window=5)
+                        
+                        # Choose color (default to gray if not in our color map)
+                        color = colors.get(prop_type, 'gray')
+                        
+                        # Add to plot
+                        fig.add_trace(go.Scatter(
+                            x=df_smooth['date'], 
+                            y=df_smooth['value_smoothed'],
+                            mode='lines',
+                            name=prop_type,
+                            line=dict(color=color, width=2)
+                        ))
+                else:
+                    # If no property types, just plot the data as is
+                    df_smooth = smooth_time_series(df_afford, 'value', window=5)
+                    fig.add_trace(go.Scatter(
+                        x=df_smooth['date'], 
+                        y=df_smooth['value_smoothed'],
+                        mode='lines',
+                        name='Affordability',
+                        line=dict(color='red', width=2)
+                    ))
                 
                 # Add reference line at 30% (generally considered rental stress)
                 fig.add_hline(
@@ -1561,7 +1694,14 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                     title=f"Rental Affordability for {selected_geo_name}",
                     xaxis_title="Date",
                     yaxis_title="Affordability (% of income on rent)",
-                    hovermode="x unified"
+                    hovermode="x unified",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
