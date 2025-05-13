@@ -935,7 +935,7 @@ def generate_comparison_comment(selected_geo_area, selected_geo_name, metric, va
         current_rate = data["vacancy_rates"]["value"]
         previous_rate = data["vacancy_rates"]["previous_year_rate"]
         
-        # Format rates for display
+        # Format rates for display - values are already percentages
         current_rate_display = current_rate
         previous_rate_display = previous_rate if previous_rate is not None else None
         
@@ -1176,7 +1176,7 @@ def create_excel_output(selected_geo_area, selected_geo_name, data):
     ws.cell(row=row, column=1).alignment = metric_alignment
     ws.cell(row=row, column=1).border = thin_border
     
-    # Format vacancy rate value correctly
+    # Format vacancy rate value - values are already percentages
     vacancy_value = data['vacancy_rates']['value']
     formatted_vacancy = f"{vacancy_value:.2f}%"
         
@@ -1205,7 +1205,7 @@ def create_excel_output(selected_geo_area, selected_geo_name, data):
     row += 1
     previous_year_rate = data['vacancy_rates']['previous_year_rate']
     
-    # Format previous year rate correctly
+    # Format previous year rate - values are already percentages
     if previous_year_rate is not None:
         previous_year_text = f"Previous year: {previous_year_rate:.2f}%"
     else:
