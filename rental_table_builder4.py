@@ -67,14 +67,14 @@ RON_REFERENCE_DATA = {
 }
 
 # Helper functions
+@st.cache_data
 def read_data_file(file_path):
     """Read data from Excel or Parquet file"""
     try:
         if file_path.endswith('.xlsx') or file_path.endswith('.xls'):
-            # Use explicit converter and dtype to avoid datetime conversion issues
+            # Only use converters, remove dtype to avoid warnings
             return pd.read_excel(
                 file_path,
-                dtype={0: str},  # Force first column to be string
                 converters={0: str}  # Ensure first column is converted to string
             )
         elif file_path.endswith('.parquet'):
@@ -109,9 +109,11 @@ def find_geographic_column(df, geo_area):
         'district', 'locality', 'suburb', 'lga', 'sa3', 'sa4', 'gccsa', 'ced', 'sed'
     ]
     
+    # Cache the lowercase column names to avoid repeated conversion
+    column_lower_map = {col: str(col).lower() for col in df.columns}
+    
     # Check for columns that contain these keywords
-    for col in df.columns:
-        col_lower = str(col).lower()
+    for col, col_lower in column_lower_map.items():
         for keyword in geo_keywords:
             if keyword in col_lower and 'code' not in col_lower and 'type' not in col_lower:
                 return col
@@ -120,10 +122,11 @@ def find_geographic_column(df, geo_area):
     if 'region_name' in df.columns:
         return 'region_name'
         
-    # If still no match, check for columns that might contain place names
+    # If still no match, limit checks to first 5 rows for performance
+    sample_size = min(5, len(df))
     for col in df.columns:
         try:
-            sample = df[col].dropna().head(5).astype(str).tolist()
+            sample = df[col].dropna().head(sample_size).astype(str).tolist()
             
             # Skip columns where values appear to be dates or numbers
             if all(not re.match(r'^\d{4}-\d{2}-\d{2}', str(x)) and 
@@ -135,8 +138,8 @@ def find_geographic_column(df, geo_area):
                 # Check if the values look like place names (contain alphabetic characters)
                 if all(any(c.isalpha() for c in str(x)) for x in sample):
                     return col
-        except Exception as e:
-            st.warning(f"Error checking column {col}: {str(e)}")
+        except Exception:
+            continue  # Silently continue instead of showing warnings for every column
     
     # Absolute last resort - first column
     if len(df.columns) > 0:
@@ -144,6 +147,7 @@ def find_geographic_column(df, geo_area):
     
     return None
 
+@st.cache_data
 def scan_root_folder(root_folder):
     """Scan the root folder for relevant data files"""
     # Dictionary to store all found files
@@ -194,52 +198,56 @@ def scan_root_folder(root_folder):
     st.session_state['uploaded_files'] = files_dict
     return files_dict
 
+@st.cache_data
 def get_geo_names(geo_area, uploaded_files):
     """Get available geographic names for the selected area type from uploaded files"""
     names = set()
     found_files = False
     
+    # Create a cached file list to avoid redundant processing
+    relevant_files = []
     for data_type, file_group in uploaded_files.items():
         for file_data in file_group:
-            geo_area_from_file = file_data['geo_area']
-            
-            if geo_area_from_file.lower() == geo_area.lower():
+            if file_data['geo_area'].lower() == geo_area.lower():
                 found_files = True
-                file_path = file_data['path']
-                df = read_data_file(file_path)
-                
-                if df is not None and not df.empty:
-                    # Look for the geographic name column
-                    geo_col = find_geographic_column(df, geo_area)
-                    
-                    if geo_col:
-                        # Convert all values to strings and filter out likely non-geographic names
-                        df[geo_col] = df[geo_col].astype(str)
-                        
-                        # Filter out values that look like dates or numbers
-                        area_names = []
-                        for name in df[geo_col].dropna().unique().tolist():
-                            name_str = str(name)
-                            # Skip if it looks like a date format (2021-01-01, etc.)
-                            if re.match(r'^\d{4}-\d{2}-\d{2}', name_str) or re.match(r'^\d{2}/\d{2}/\d{4}', name_str):
-                                continue
-                            # Skip if it's just a number
-                            if name_str.isdigit():
-                                continue
-                            # Skip very short names (likely codes)
-                            if len(name_str) < 2:
-                                continue
-                            # Skip if it's an LGA/SA code
-                            if re.match(r'^LGA\d+$', name_str) or re.match(r'^SA\d+$', name_str):
-                                continue
-                            
-                            area_names.append(name_str)
-                        
-                        names.update(area_names)
+                relevant_files.append(file_data['path'])
     
     if not found_files:
         st.warning(f"No data files found for {geo_area}. Please check your uploaded files.")
         return []
+    
+    # Read each file only once
+    for file_path in set(relevant_files):  # Remove duplicates with set()
+        df = read_data_file(file_path)
+        
+        if df is not None and not df.empty:
+            # Look for the geographic name column
+            geo_col = find_geographic_column(df, geo_area)
+            
+            if geo_col:
+                # Convert all values to strings and filter out likely non-geographic names
+                df[geo_col] = df[geo_col].astype(str)
+                
+                # Filter out values that look like dates or numbers
+                area_names = []
+                for name in df[geo_col].dropna().unique().tolist():
+                    name_str = str(name)
+                    # Skip if it looks like a date format (2021-01-01, etc.)
+                    if re.match(r'^\d{4}-\d{2}-\d{2}', name_str) or re.match(r'^\d{2}/\d{2}/\d{4}', name_str):
+                        continue
+                    # Skip if it's just a number
+                    if name_str.isdigit():
+                        continue
+                    # Skip very short names (likely codes)
+                    if len(name_str) < 2:
+                        continue
+                    # Skip if it's an LGA/SA code
+                    if re.match(r'^LGA\d+$', name_str) or re.match(r'^SA\d+$', name_str):
+                        continue
+                    
+                    area_names.append(name_str)
+                
+                names.update(area_names)
     
     if not names:
         st.warning(f"No geographic names found for {geo_area}. Check that your data files contain the expected columns.")
@@ -247,6 +255,80 @@ def get_geo_names(geo_area, uploaded_files):
         
     return sorted(list(names))
 
+def optimize_datetime_handling(df, month_col='month'):
+    """Optimize datetime handling to avoid slow operations"""
+    if month_col in df.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df[month_col]):
+                # Already a datetime - no need to convert
+                return df
+            else:
+                # Convert to datetime format more efficiently
+                df[month_col] = pd.to_datetime(df[month_col], errors='coerce', cache=True)
+                return df
+        except Exception:
+            # If any error in conversion, return original df
+            return df
+    else:
+        return df
+
+def extract_time_series(df, date_col, value_col):
+    """Extract time series data more efficiently"""
+    if date_col not in df.columns or value_col not in df.columns:
+        return None
+        
+    try:
+        # Ensure date column is datetime
+        if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            
+        # Sort by date
+        df_sorted = df.sort_values(date_col)
+        
+        # Use vectorized operations instead of row iteration
+        mask = ~df_sorted[value_col].isna()
+        dates = df_sorted.loc[mask, date_col].dt.strftime('%Y-%m-%d').tolist()
+        values = df_sorted.loc[mask, value_col].astype(float).tolist()
+        
+        # Create the time series data using list comprehension
+        return [{'date': date, 'value': value} for date, value in zip(dates, values)]
+    except Exception:
+        return None
+
+@st.cache_data
+def filter_dataframe_for_region(df, geo_col, selected_name_str):
+    """Filter dataframe for a specific region, with fallback to partial matching"""
+    if df is None or df.empty or geo_col not in df.columns:
+        return None
+    
+    # Ensure both values are strings for comparison
+    df[geo_col] = df[geo_col].astype(str)
+    
+    # Check for exact match
+    df_filtered = df[df[geo_col] == selected_name_str]
+    
+    # Try partial match if no exact match
+    if df_filtered.empty:
+        # Create a boolean mask for partial matches
+        contains_mask = df[geo_col].str.lower().str.contains(selected_name_str.lower(), regex=False)
+        contained_mask = df[geo_col].str.lower().apply(lambda x: selected_name_str.lower() in x)
+        
+        # Combine the masks with OR
+        combined_mask = contains_mask | contained_mask
+        
+        # Filter using the mask
+        df_filtered = df[combined_mask]
+        
+        # If still empty, look for the closest match using a more relaxed approach
+        if df_filtered.empty:
+            for value in df[geo_col].dropna().unique():
+                if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
+                    df_filtered = df[df[geo_col] == value]
+                    break
+    
+    return df_filtered
+
+@st.cache_data
 def collect_census_data(selected_geo_area, selected_geo_name, uploaded_files):
     """Collect census dwelling data"""
     data = {}
@@ -263,22 +345,8 @@ def collect_census_data(selected_geo_area, selected_geo_name, uploaded_files):
                     geo_col = find_geographic_column(df, selected_geo_area)
                     
                     if geo_col:
-                        # Ensure both values are strings for comparison
-                        df[geo_col] = df[geo_col].astype(str)
-                        selected_name_str = str(selected_geo_name)
-                        
-                        # Check for exact match
-                        df_filtered = df[df[geo_col] == selected_name_str]
-                        if df_filtered.empty:
-                            # Try partial match
-                            matches = []
-                            for value in df[geo_col].dropna().unique():
-                                if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                    matches.append(value)
-                            
-                            if matches:
-                                best_match = matches[0]  # Use the first match for simplicity
-                                df_filtered = df[df[geo_col] == best_match]
+                        # Filter for the selected region
+                        df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
                             # Calculate rental percentage
@@ -342,6 +410,7 @@ def collect_census_data(selected_geo_area, selected_geo_name, uploaded_files):
         
     return data
 
+@st.cache_data
 def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_files):
     """Collect median rent data"""
     data = {}
@@ -358,19 +427,13 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
                     geo_col = find_geographic_column(df, selected_geo_area)
                     
                     if geo_col:
-                        # Ensure both values are strings for comparison
-                        df[geo_col] = df[geo_col].astype(str)
-                        selected_name_str = str(selected_geo_name)
-                        
-                        # Check for exact match or partial match
-                        df_filtered = df[df[geo_col] == selected_name_str]
-                        if df_filtered.empty:
-                            for value in df[geo_col].dropna().unique():
-                                if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                    df_filtered = df[df[geo_col] == value]
-                                    break
+                        # Filter for the selected region
+                        df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
+                            # Optimize datetime handling
+                            df_filtered = optimize_datetime_handling(df_filtered)
+                            
                             # If we have a month column, get the most recent month
                             latest_month = None
                             df_latest = None
@@ -378,7 +441,6 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
                             
                             if 'month' in df_filtered.columns:
                                 try:
-                                    df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
                                     latest_month = df_filtered['month'].max()
                                     
                                     df_latest = df_filtered[df_filtered['month'] == latest_month]
@@ -393,7 +455,7 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
                                         if not prior_months.empty:
                                             closest_prior_month = prior_months.max()
                                             df_year_ago = df_filtered[df_filtered['month'] == closest_prior_month]
-                                except Exception as e:
+                                except Exception:
                                     df_latest = df_filtered
                                     df_year_ago = None
                             else:
@@ -454,20 +516,7 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
                                 # Create time series data if month column exists
                                 time_series = None
                                 if 'month' in df_filtered.columns and rent_col in df_filtered.columns:
-                                    try:
-                                        # Sort by month
-                                        df_sorted = df_filtered.sort_values('month')
-                                        
-                                        # Create time series data
-                                        time_series = []
-                                        for _, row in df_sorted.iterrows():
-                                            if not pd.isna(row[rent_col]):
-                                                time_series.append({
-                                                    'date': row['month'].strftime('%Y-%m-%d'),
-                                                    'value': float(row[rent_col])
-                                                })
-                                    except Exception as e:
-                                        time_series = None
+                                    time_series = extract_time_series(df_filtered, 'month', rent_col)
                                 
                                 data["median_rent"] = {
                                     "value": int(round(rent_value, 0)),
@@ -487,6 +536,7 @@ def collect_median_rent_data(selected_geo_area, selected_geo_name, uploaded_file
         
     return data
 
+@st.cache_data
 def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_files):
     """Collect vacancy rate data"""
     data = {}
@@ -503,29 +553,22 @@ def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_fil
                     geo_col = find_geographic_column(df, selected_geo_area)
                     
                     if geo_col:
-                        # Ensure both values are strings for comparison
-                        df[geo_col] = df[geo_col].astype(str)
-                        selected_name_str = str(selected_geo_name)
-                        
-                        # Check for exact match or partial match
-                        df_filtered = df[df[geo_col] == selected_name_str]
-                        if df_filtered.empty:
-                            for value in df[geo_col].dropna().unique():
-                                if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                    df_filtered = df[df[geo_col] == value]
-                                    break
+                        # Filter for the selected region
+                        df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
+                            # Optimize datetime handling
+                            df_filtered = optimize_datetime_handling(df_filtered)
+                            
                             # If we have a month column, get the most recent month
                             latest_month = None
                             df_latest = None
                             
                             if 'month' in df_filtered.columns:
                                 try:
-                                    df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
                                     latest_month = df_filtered['month'].max()
                                     df_latest = df_filtered[df_filtered['month'] == latest_month]
-                                except Exception as e:
+                                except Exception:
                                     df_latest = df_filtered
                             else:
                                 df_latest = df_filtered
@@ -564,26 +607,13 @@ def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_fil
                                             if not closest_data.empty and rate_col in closest_data.columns:
                                                 prior_value = float(closest_data[rate_col].iloc[0]) if not pd.isna(closest_data[rate_col].iloc[0]) else 0
                                                 previous_year_rate = prior_value
-                                except Exception as e:
+                                except Exception:
                                     previous_year_rate = None
                             
                             # Create time series data if month column exists
                             time_series = None
                             if 'month' in df_filtered.columns and rate_col in df_filtered.columns:
-                                try:
-                                    # Sort by month
-                                    df_sorted = df_filtered.sort_values('month')
-                                    
-                                    # Create time series data
-                                    time_series = []
-                                    for _, row in df_sorted.iterrows():
-                                        if not pd.isna(row[rate_col]):
-                                            time_series.append({
-                                                'date': row['month'].strftime('%Y-%m-%d'),
-                                                'value': float(row[rate_col])
-                                            })
-                                except Exception as e:
-                                    time_series = None
+                                time_series = extract_time_series(df_filtered, 'month', rate_col)
                             
                             # Extract data
                             if rate_col and df_latest is not None and len(df_latest) > 0:
@@ -607,6 +637,7 @@ def collect_vacancy_rate_data(selected_geo_area, selected_geo_name, uploaded_fil
         
     return data
 
+@st.cache_data
 def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_files):
     """Collect affordability data"""
     data = {}
@@ -623,19 +654,13 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                     geo_col = find_geographic_column(df, selected_geo_area)
                     
                     if geo_col:
-                        # Ensure both values are strings for comparison
-                        df[geo_col] = df[geo_col].astype(str)
-                        selected_name_str = str(selected_geo_name)
-                        
-                        # Check for exact match or partial match
-                        df_filtered = df[df[geo_col] == selected_name_str]
-                        if df_filtered.empty:
-                            for value in df[geo_col].dropna().unique():
-                                if selected_name_str.lower() in value.lower() or value.lower() in selected_name_str.lower():
-                                    df_filtered = df[df[geo_col] == value]
-                                    break
+                        # Filter for the selected region
+                        df_filtered = filter_dataframe_for_region(df, geo_col, str(selected_geo_name))
                         
                         if not df_filtered.empty:
+                            # Optimize datetime handling
+                            df_filtered = optimize_datetime_handling(df_filtered)
+                            
                             # If we have a month column, get the most recent month
                             latest_month = None
                             previous_year_month = None
@@ -645,7 +670,6 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                             
                             if 'month' in df_filtered.columns:
                                 try:
-                                    df_filtered['month'] = pd.to_datetime(df_filtered['month'], errors='coerce')
                                     latest_month = df_filtered['month'].max()
                                     df_latest = df_filtered[df_filtered['month'] == latest_month]
                                     
@@ -664,7 +688,7 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                                             previous_year_month = closest_prior_month
                                     else:
                                         previous_year_month = one_year_ago
-                                except Exception as e:
+                                except Exception:
                                     df_latest = df_filtered
                                     df_year_ago = None
                             else:
@@ -698,23 +722,13 @@ def collect_affordability_data(selected_geo_area, selected_geo_name, uploaded_fi
                             # Create time series data if month column exists
                             time_series = None
                             if 'month' in df_filtered.columns and pct_col in df_filtered.columns:
-                                try:
-                                    # Sort by month
-                                    df_sorted = df_filtered.sort_values('month')
-                                    
-                                    # Create time series data
-                                    time_series = []
-                                    for _, row in df_sorted.iterrows():
-                                        if not pd.isna(row[pct_col]):
-                                            value = float(row[pct_col])
-                                            if value > 0 and value < 1:
-                                                value = value * 100  # Convert decimal to percentage
-                                            time_series.append({
-                                                'date': row['month'].strftime('%Y-%m-%d'),
-                                                'value': value
-                                            })
-                                except Exception as e:
-                                    time_series = None
+                                time_series = extract_time_series(df_filtered, 'month', pct_col)
+                                
+                                # Convert decimal values to percentages if needed
+                                if time_series:
+                                    for point in time_series:
+                                        if point['value'] > 0 and point['value'] < 1:
+                                            point['value'] = point['value'] * 100
                             
                             # Extract current affordability value
                             if pct_col and df_latest is not None and len(df_latest) > 0:
@@ -1782,20 +1796,39 @@ if has_files:
             # Add a button to generate the analysis
             if st.button("Generate Analysis", type="primary"):
                 with st.spinner(f"Analyzing data for {selected_geo_name}..."):
+                    # Create a progress bar
+                    progress_bar = st.progress(0)
+                    
                     # Collect data for the selected area
                     data = {}
+                    
+                    # Update progress
+                    progress_bar.progress(20)
+                    st.info("Collecting census data...")
                     
                     # Collect Census dwelling data
                     census_data = collect_census_data(selected_geo_area, selected_geo_name, st.session_state['uploaded_files'])
                     data.update(census_data)
                     
+                    # Update progress
+                    progress_bar.progress(40)
+                    st.info("Collecting median rent data...")
+                    
                     # Collect Median Rent data
                     rent_data = collect_median_rent_data(selected_geo_area, selected_geo_name, st.session_state['uploaded_files'])
                     data.update(rent_data)
                     
+                    # Update progress
+                    progress_bar.progress(60)
+                    st.info("Collecting vacancy rate data...")
+                    
                     # Collect Vacancy Rate data
                     vacancy_data = collect_vacancy_rate_data(selected_geo_area, selected_geo_name, st.session_state['uploaded_files'])
                     data.update(vacancy_data)
+                    
+                    # Update progress
+                    progress_bar.progress(80)
+                    st.info("Collecting affordability data...")
                     
                     # Collect Affordability data
                     affordability_data = collect_affordability_data(selected_geo_area, selected_geo_name, st.session_state['uploaded_files'])
@@ -1803,6 +1836,10 @@ if has_files:
                     
                     # Ensure all required data is available (use defaults if missing)
                     data = ensure_default_data(data)
+                    
+                    # Complete progress
+                    progress_bar.progress(100)
+                    st.success("Analysis complete!")
                     
                     # Store data in session state
                     st.session_state['data'] = data
