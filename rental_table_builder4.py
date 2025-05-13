@@ -1163,7 +1163,6 @@ def create_excel_output(selected_geo_area, selected_geo_name, data):
     
     # Format vacancy rate value - ensure it's displayed as a percentage
     vacancy_value = data['vacancy_rates']['value']
-    vacancy_display = vacancy_value * 100 if vacancy_value < 1 else vacancy_value
     formatted_vacancy = f"{vacancy_display:.2f}%"
         
     ws.cell(row=row, column=2).value = formatted_vacancy
@@ -1323,7 +1322,7 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
         
         # Ensure vacancy rate is displayed as percentage
         vacancy_value = vacancy_data['value']
-        vacancy_display = vacancy_value * 100 if vacancy_value < 1 else vacancy_value
+        vacancy_display = vacancy_value 
         
         prev_year_rate = vacancy_data.get('previous_year_rate')
         if prev_year_rate is not None:
