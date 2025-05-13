@@ -849,6 +849,21 @@ def ensure_default_data(data):
         
     return data
 
+def smooth_time_series(df, value_col, window=5):
+    """Apply smoothing to a time series dataframe"""
+    # Make a copy to avoid modifying the original
+    df_smooth = df.copy()
+    
+    # Add the smoothed column
+    if len(df) >= window:
+        df_smooth['value_smoothed'] = df[value_col].rolling(window=window, center=True).mean()
+        # Handle NaN values at the edges of the smoothed data
+        df_smooth['value_smoothed'] = df_smooth['value_smoothed'].fillna(df_smooth[value_col])
+    else:
+        df_smooth['value_smoothed'] = df_smooth[value_col]
+        
+    return df_smooth
+
 def generate_comparison_comment(selected_geo_area, selected_geo_name, metric, value, comparison_gs, comparison_ron, data):
     """Generate a comparison comment for a metric that shows both Greater Sydney and Rest of NSW references"""
     # Get the comparison values
@@ -920,9 +935,9 @@ def generate_comparison_comment(selected_geo_area, selected_geo_name, metric, va
         current_rate = data["vacancy_rates"]["value"]
         previous_rate = data["vacancy_rates"]["previous_year_rate"]
         
-        # Format rates for display (show as percentage)
-        current_rate_display = current_rate * 100 if current_rate < 1 else current_rate
-        previous_rate_display = previous_rate * 100 if previous_rate is not None and previous_rate < 1 else previous_rate
+        # Format rates for display
+        current_rate_display = current_rate
+        previous_rate_display = previous_rate if previous_rate is not None else None
         
         # Generate text about market tightening/loosening if previous year data available
         trend_text = ""
@@ -1161,10 +1176,9 @@ def create_excel_output(selected_geo_area, selected_geo_name, data):
     ws.cell(row=row, column=1).alignment = metric_alignment
     ws.cell(row=row, column=1).border = thin_border
     
-    # Format vacancy rate value - ensure it's displayed as a percentage
+    # Format vacancy rate value correctly
     vacancy_value = data['vacancy_rates']['value']
-    vacancy_display = vacancy_value * 100 if vacancy_value < 1 else vacancy_value
-    formatted_vacancy = f"{vacancy_display:.2f}%"
+    formatted_vacancy = f"{vacancy_value:.2f}%"
         
     ws.cell(row=row, column=2).value = formatted_vacancy
     ws.cell(row=row, column=2).font = value_font
@@ -1191,10 +1205,9 @@ def create_excel_output(selected_geo_area, selected_geo_name, data):
     row += 1
     previous_year_rate = data['vacancy_rates']['previous_year_rate']
     
-    # Format previous year rate - ensure it's displayed as a percentage
+    # Format previous year rate correctly
     if previous_year_rate is not None:
-        prev_rate_display = previous_year_rate * 100 if previous_year_rate < 1 else previous_year_rate
-        previous_year_text = f"Previous year: {prev_rate_display:.2f}%"
+        previous_year_text = f"Previous year: {previous_year_rate:.2f}%"
     else:
         previous_year_text = "Previous year data not available"
         
@@ -1321,26 +1334,24 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
         st.subheader("Vacancy Rates")
         vacancy_data = data["vacancy_rates"]
         
-        # Ensure vacancy rate is displayed as percentage
+        # Display vacancy rate correctly
         vacancy_value = vacancy_data['value']
-        vacancy_display = vacancy_value * 100 if vacancy_value < 1 else vacancy_value
         
         prev_year_rate = vacancy_data.get('previous_year_rate')
         if prev_year_rate is not None:
-            prev_year_display = prev_year_rate * 100 if prev_year_rate < 1 else prev_year_rate
-            delta_value = vacancy_display - prev_year_display
+            delta_value = vacancy_value - prev_year_rate
         else:
             delta_value = None
         
         st.metric(
             label=f"Vacancy Rate ({vacancy_data['period']})",
-            value=f"{vacancy_display:.2f}%",
+            value=f"{vacancy_value:.2f}%",
             delta=f"{delta_value:.2f}%" if delta_value is not None else None,
             delta_color="normal"  # Higher vacancy rate is generally better for renters
         )
         
         if prev_year_rate is not None:
-            st.markdown(f"**Previous year:** {prev_year_display:.2f}%")
+            st.markdown(f"**Previous year:** {prev_year_rate:.2f}%")
     
     with col3:
         # Affordability card
@@ -1401,14 +1412,38 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_rent = pd.DataFrame(rent_series)
                 df_rent['date'] = pd.to_datetime(df_rent['date'])
                 
-                # Create the chart
-                fig = px.line(
-                    df_rent, 
-                    x='date', 
-                    y='value', 
+                # Apply smoothing
+                df_rent_smooth = smooth_time_series(df_rent, 'value', window=5)
+                
+                # Create the chart with both raw and smoothed data
+                fig = go.Figure()
+                
+                # Add raw data as a light line
+                fig.add_trace(go.Scatter(
+                    x=df_rent['date'], 
+                    y=df_rent['value'],
+                    mode='lines',
+                    name='Raw Data',
+                    line=dict(color='lightblue', width=1)
+                ))
+                
+                # Add smoothed data as a darker line
+                fig.add_trace(go.Scatter(
+                    x=df_rent_smooth['date'], 
+                    y=df_rent_smooth['value_smoothed'],
+                    mode='lines',
+                    name='Smoothed (5-month avg)',
+                    line=dict(color='blue', width=3)
+                ))
+                
+                # Update layout
+                fig.update_layout(
                     title=f"Median Weekly Rent for {selected_geo_name}",
-                    labels={'value': 'Median Rent ($)', 'date': 'Date'}
+                    xaxis_title="Date",
+                    yaxis_title="Median Rent ($)",
+                    hovermode="x unified"
                 )
+                
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No time series data available for median rent.")
@@ -1421,31 +1456,45 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_vacancy = pd.DataFrame(vacancy_series)
                 df_vacancy['date'] = pd.to_datetime(df_vacancy['date'])
                 
-                # Convert to percentage for display if needed
-                if df_vacancy['value'].max() < 1:
-                    df_vacancy['value_pct'] = df_vacancy['value'] * 100
-                    y_column = 'value_pct'
-                    y_label = 'Vacancy Rate (%)'
-                else:
-                    y_column = 'value'
-                    y_label = 'Vacancy Rate (%)'
+                # Apply smoothing
+                df_vacancy_smooth = smooth_time_series(df_vacancy, 'value', window=5)
                 
-                # Create the chart
-                fig = px.line(
-                    df_vacancy, 
-                    x='date', 
-                    y=y_column, 
-                    title=f"Vacancy Rate for {selected_geo_name}",
-                    labels={y_column: y_label, 'date': 'Date'}
-                )
+                # Create the chart with both raw and smoothed data
+                fig = go.Figure()
+                
+                # Add raw data as a light line
+                fig.add_trace(go.Scatter(
+                    x=df_vacancy['date'], 
+                    y=df_vacancy['value'],
+                    mode='lines',
+                    name='Raw Data',
+                    line=dict(color='lightgreen', width=1)
+                ))
+                
+                # Add smoothed data as a darker line
+                fig.add_trace(go.Scatter(
+                    x=df_vacancy_smooth['date'], 
+                    y=df_vacancy_smooth['value_smoothed'],
+                    mode='lines',
+                    name='Smoothed (5-month avg)',
+                    line=dict(color='green', width=3)
+                ))
                 
                 # Add reference line at 3% (generally considered a balanced market)
                 fig.add_hline(
-                    y=3, 
+                    y=3.0, 
                     line_dash="dash", 
-                    line_color="green",
+                    line_color="gray",
                     annotation_text="Balanced Market (3%)",
                     annotation_position="bottom right"
+                )
+                
+                # Update layout
+                fig.update_layout(
+                    title=f"Vacancy Rate for {selected_geo_name}",
+                    xaxis_title="Date",
+                    yaxis_title="Vacancy Rate (%)",
+                    hovermode="x unified"
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
@@ -1460,14 +1509,29 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                 df_afford = pd.DataFrame(affordability_series)
                 df_afford['date'] = pd.to_datetime(df_afford['date'])
                 
-                # Create the chart
-                fig = px.line(
-                    df_afford, 
-                    x='date', 
-                    y='value', 
-                    title=f"Rental Affordability for {selected_geo_name}",
-                    labels={'value': 'Affordability (% of income on rent)', 'date': 'Date'}
-                )
+                # Apply smoothing
+                df_afford_smooth = smooth_time_series(df_afford, 'value', window=5)
+                
+                # Create the chart with both raw and smoothed data
+                fig = go.Figure()
+                
+                # Add raw data as a light line
+                fig.add_trace(go.Scatter(
+                    x=df_afford['date'], 
+                    y=df_afford['value'],
+                    mode='lines',
+                    name='Raw Data',
+                    line=dict(color='lightcoral', width=1)
+                ))
+                
+                # Add smoothed data as a darker line
+                fig.add_trace(go.Scatter(
+                    x=df_afford_smooth['date'], 
+                    y=df_afford_smooth['value_smoothed'],
+                    mode='lines',
+                    name='Smoothed (5-month avg)',
+                    line=dict(color='red', width=3)
+                ))
                 
                 # Add reference line at 30% (generally considered rental stress)
                 fig.add_hline(
@@ -1476,6 +1540,14 @@ def display_dashboard(selected_geo_area, selected_geo_name, data):
                     line_color="red",
                     annotation_text="Rental Stress Threshold (30%)",
                     annotation_position="bottom right"
+                )
+                
+                # Update layout
+                fig.update_layout(
+                    title=f"Rental Affordability for {selected_geo_name}",
+                    xaxis_title="Date",
+                    yaxis_title="Affordability (% of income on rent)",
+                    hovermode="x unified"
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
